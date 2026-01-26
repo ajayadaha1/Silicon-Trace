@@ -211,6 +211,30 @@ def clean_value(value: Any) -> Any:
     return value
 
 
+def normalize_column_name(column_name: str) -> str:
+    """
+    Normalize column names to handle case sensitivity and extra spaces.
+    This ensures columns like ' FA status ', 'FA status', 'fa status' 
+    are all treated as the same column.
+    
+    Args:
+        column_name: Original column name from Excel
+        
+    Returns:
+        Normalized column name (lowercase, trimmed, single spaces)
+    """
+    if not isinstance(column_name, str):
+        return str(column_name)
+    
+    # Convert to lowercase, strip leading/trailing spaces
+    normalized = column_name.strip().lower()
+    
+    # Replace multiple spaces with single space
+    normalized = ' '.join(normalized.split())
+    
+    return normalized
+
+
 def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str, Any]]:
     """
     Parse an Excel file and extract asset data with intelligent serial number detection.
@@ -273,7 +297,11 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
                 print(f"Skipping sheet '{sheet_name}': matches skip pattern")
                 continue
             
+            # Read with no duplicate column handling - we'll merge them ourselves
             df = pd.read_excel(file_path, sheet_name=sheet_name)
+            
+            # Log columns for debugging duplicate detection
+            print(f"Sheet '{sheet_name}' columns: {list(df.columns)}")
             
             if df.empty:
                 continue
@@ -343,25 +371,35 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
                         combined_data[serial_number]['status'] = str(status_value)
                 
                 # Merge raw_data from this sheet
-                # Smart column merging: if column already exists, append sheet name suffix
-                # Otherwise use original column name
+                # Smart column merging: normalize column names to handle case/space differences
                 for col in df.columns:
                     value = clean_value(row[col])
                     # Skip None values
                     if value is None:
                         continue
                     
-                    # Use original column name
-                    col_name = col
+                    # Normalize column name (handles ' FA status ', 'FA status', etc.)
+                    normalized_col = normalize_column_name(col)
                     
-                    # If this column already exists with different value, add sheet suffix
-                    if col_name in combined_data[serial_number]['raw_data']:
-                        existing_value = combined_data[serial_number]['raw_data'][col_name]
-                        # Only add suffix if values are different
+                    # Check if this normalized column already exists
+                    existing_key = None
+                    for existing_col in combined_data[serial_number]['raw_data'].keys():
+                        if not existing_col.startswith('_'):  # Skip metadata fields
+                            if normalize_column_name(existing_col) == normalized_col:
+                                existing_key = existing_col
+                                break
+                    
+                    if existing_key:
+                        # Column already exists - check if values are different
+                        existing_value = combined_data[serial_number]['raw_data'][existing_key]
                         if existing_value != value:
-                            col_name = f"{col}_{sheet_name}"
-                    
-                    combined_data[serial_number]['raw_data'][col_name] = value
+                            # Different value - concatenate with separator
+                            # This preserves data from duplicate columns
+                            combined_data[serial_number]['raw_data'][existing_key] = f"{existing_value} | {value}"
+                        # else: Same value - skip (don't duplicate)
+                    else:
+                        # New column - use original column name (preserves original casing/spacing)
+                        combined_data[serial_number]['raw_data'][col] = value
         
         except Exception as e:
             # Log warning but continue with other sheets

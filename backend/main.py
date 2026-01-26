@@ -20,7 +20,7 @@ from pydantic import BaseModel
 
 from models import Asset
 from database import get_session, init_db
-from parser import parse_excel
+from parser import parse_excel, normalize_column_name
 
 
 # Initialize FastAPI app
@@ -119,6 +119,20 @@ async def upload_excel(
     
     # Save uploaded file temporarily
     try:
+        # Check if this exact filename was already uploaded
+        stmt = select(Asset).where(Asset.source_filename == file.filename).limit(1)
+        result = await session.execute(stmt)
+        existing_file = result.scalar_one_or_none()
+        
+        if existing_file:
+            # Check if it's in _files_combined (meaning it was part of a merge)
+            files_combined = existing_file.raw_data.get('_files_combined', existing_file.source_filename)
+            if file.filename in files_combined:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"File '{file.filename}' has already been uploaded. Please delete existing data first if you want to re-upload."
+                )
+        
         with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp_file:
             content = await file.read()
             tmp_file.write(content)
@@ -151,6 +165,7 @@ async def upload_excel(
         # Process records - upsert based on serial number
         rows_created = 0
         rows_updated = 0
+        rows_merged_from_multiple_files = 0
         
         for record in parsed_records:
             # Check if asset already exists
@@ -159,11 +174,69 @@ async def upload_excel(
             existing_asset = result.scalar_one_or_none()
             
             if existing_asset:
-                # Update existing record (keep original ingest_timestamp)
-                existing_asset.error_type = record['error_type']
-                existing_asset.status = record['status']
+                # Track if this is a merge from a different file
+                is_different_file = existing_asset.source_filename != record['source_filename']
+                if is_different_file:
+                    rows_merged_from_multiple_files += 1
+                    print(f"Merging data for serial {record['serial_number']}: {existing_asset.source_filename} + {record['source_filename']}")
+                
+                # Merge data from multiple files instead of replacing
+                # Track which files contributed data
+                existing_files = existing_asset.raw_data.get('_files_combined', existing_asset.source_filename)
+                new_file = record['source_filename']
+                
+                # Add new file to the list if not already there
+                if new_file not in existing_files:
+                    existing_asset.raw_data['_files_combined'] = f"{existing_files} | {new_file}"
+                else:
+                    existing_asset.raw_data['_files_combined'] = existing_files
+                
+                # Merge raw_data columns intelligently
+                for key, new_value in record['raw_data'].items():
+                    if key.startswith('_'):
+                        # Handle metadata fields specially
+                        if key == '_sheets_combined':
+                            # Append new sheets info
+                            old_sheets = existing_asset.raw_data.get('_sheets_combined', '')
+                            existing_asset.raw_data['_sheets_combined'] = f"{old_sheets} | {new_value}" if old_sheets else new_value
+                        elif key == '_total_sheets':
+                            # Sum total sheets
+                            existing_asset.raw_data['_total_sheets'] = existing_asset.raw_data.get('_total_sheets', 0) + new_value
+                        elif key not in ['_source_sheet', '_source_row', '_serial_column']:
+                            # Preserve other metadata
+                            existing_asset.raw_data[key] = new_value
+                        continue
+                    
+                    # Check if column already exists (with normalization)
+                    normalized_key = normalize_column_name(key)
+                    existing_key = None
+                    
+                    for existing_col in existing_asset.raw_data.keys():
+                        if not existing_col.startswith('_'):
+                            if normalize_column_name(existing_col) == normalized_key:
+                                existing_key = existing_col
+                                break
+                    
+                    if existing_key:
+                        # Column exists - check if values differ
+                        existing_value = existing_asset.raw_data[existing_key]
+                        if existing_value != new_value:
+                            # Concatenate different values
+                            existing_asset.raw_data[existing_key] = f"{existing_value} | {new_value}"
+                        # else: same value, skip
+                    else:
+                        # New column - add it
+                        existing_asset.raw_data[key] = new_value
+                
+                # Update error_type and status if new ones are available
+                if record['error_type']:
+                    existing_asset.error_type = record['error_type']
+                if record['status']:
+                    existing_asset.status = record['status']
+                
+                # Update source_filename to show latest file
                 existing_asset.source_filename = record['source_filename']
-                existing_asset.raw_data = record['raw_data']
+                
                 # Don't update ingest_timestamp - preserve original creation time
                 rows_updated += 1
             else:
@@ -175,9 +248,13 @@ async def upload_excel(
         # Commit transaction
         await session.commit()
         
+        # Log summary
+        if rows_merged_from_multiple_files > 0:
+            print(f"✓ Multi-file merge summary: {rows_merged_from_multiple_files} serial numbers found in multiple files")
+        
         return UploadResponse(
             success=True,
-            message=f"Successfully processed {len(parsed_records)} records",
+            message=f"Successfully processed {len(parsed_records)} records ({rows_merged_from_multiple_files} merged from multiple files)",
             rows_processed=len(parsed_records),
             rows_created=rows_created,
             rows_updated=rows_updated
