@@ -900,24 +900,75 @@ with tab2:
 
             
             elif view_mode == "📊 Aggregate View":
-                # Aggregate View: Group by error type
-                st.caption("Assets grouped by error type")
+                # Aggregate View: Group by various fields
                 
-                # Group assets by error type
+                # Add grouping selector
+                group_by = st.radio(
+                    "Group By",
+                    options=["Error Type", "Month", "Status", "Customer"],
+                    horizontal=True,
+                    help="Select field to group assets by"
+                )
+                
+                st.caption(f"Assets grouped by {group_by.lower()}")
+                
+                # Group assets by selected field
                 from collections import defaultdict
                 groups = defaultdict(list)
                 
                 for asset in assets:
                     key_cols = get_key_columns(asset)
-                    error_type = key_cols['Error']
-                    groups[error_type].append(asset)
+                    raw_data = asset.get('raw_data', {})
+                    
+                    if group_by == "Error Type":
+                        group_key = key_cols.get('Error', 'Unknown')
+                    
+                    elif group_by == "Status":
+                        group_key = key_cols.get('Status', 'Unknown')
+                    
+                    elif group_by == "Month":
+                        # Extract month from date
+                        date_str = key_cols.get('Date', '')
+                        if date_str and date_str != 'N/A':
+                            try:
+                                for fmt in ['%Y-%m-%d', '%m/%d/%Y', '%d/%m/%Y', '%Y/%m/%d']:
+                                    try:
+                                        date_obj = datetime.strptime(str(date_str).split()[0], fmt)
+                                        group_key = date_obj.strftime('%Y-%m')
+                                        break
+                                    except:
+                                        continue
+                                else:
+                                    group_key = 'Unknown'
+                            except:
+                                group_key = 'Unknown'
+                        else:
+                            group_key = 'Unknown'
+                    
+                    elif group_by == "Customer":
+                        # Intelligently extract customer from raw_data
+                        customer_keywords = ['customer', 'client', 'end_customer', 'end customer', 
+                                           'customer_name', 'customer name', '客户', 'cust']
+                        customer_found = False
+                        for key, value in raw_data.items():
+                            if not key.startswith('_') and value and any(kw in key.lower() for kw in customer_keywords):
+                                customer_name = str(value).strip().upper()
+                                if customer_name and customer_name not in ['N/A', 'NA', 'NONE', '']:
+                                    group_key = customer_name
+                                    customer_found = True
+                                    break
+                        
+                        if not customer_found:
+                            group_key = 'Unknown'
+                    
+                    groups[group_key].append(asset)
                 
                 # Sort by count (descending)
                 sorted_groups = sorted(groups.items(), key=lambda x: len(x[1]), reverse=True)
                 
                 # Display groups
-                for error_type, group_assets in sorted_groups:
-                    with st.expander(f"**{error_type}** ({len(group_assets)} assets)"):
+                for idx, (group_name, group_assets) in enumerate(sorted_groups):
+                    with st.expander(f"**{group_name}** ({len(group_assets)} assets)"):
                         # Show serial numbers in this group
                         sn_list = [asset['serial_number'] for asset in group_assets]
                         
@@ -931,7 +982,7 @@ with tab2:
                             st.metric("Total Count", len(group_assets))
                         
                         # Show detailed list button
-                        if st.button(f"Show all {len(group_assets)} assets", key=f"show_{error_type}"):
+                        if st.button(f"Show all {len(group_assets)} assets", key=f"show_{group_by}_{idx}"):
                             st.markdown("**Assets in this group:**")
                             group_table = []
                             for ga in group_assets:
