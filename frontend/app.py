@@ -327,24 +327,35 @@ with tab2:
     st.markdown("Search for assets by serial number or keyword.")
     
     # Search input
+    # Search input
     search_query = st.text_input(
         "🔍 Enter Serial Number or Search Term",
         placeholder="e.g., ABC12345XYZ",
-        help="Enter a serial number or search term to find assets"
+        help="Enter a serial number or search term to find assets",
+        key="search_input"
     )
     
-    col1, col2 = st.columns([1, 4])
+    # Search and Clear buttons below the search box
+    btn_col1, btn_col2 = st.columns([1, 1])
     
-    with col1:
-        search_button = st.button("Search", type="primary", use_container_width=True)
+    with btn_col1:
+        search_button = st.button("🔍 Search", type="primary", use_container_width=True)
     
-    if search_button and search_query:
+    with btn_col2:
+        clear_button = st.button("✖ Clear", type="secondary", use_container_width=True)
+    
+    # Handle clear button
+    if clear_button:
+        st.rerun()
+    
+    # Perform search if query exists and button clicked
+    if search_query and search_button:
         with st.spinner("Searching..."):
             # Try exact match first
             asset = search_asset(search_query)
             
             if asset:
-                st.success(f"✓ Found asset: **{asset['serial_number']}**")
+                st.success(f"✓ Found exact match: **{asset['serial_number']}**")
                 
                 # Display asset card
                 display_asset_card(asset)
@@ -368,24 +379,39 @@ with tab2:
                 
             else:
                 # Try fuzzy search
-                st.info("Exact match not found. Searching for similar assets...")
+                st.info("🔍 No exact match. Searching for similar assets...")
                 search_results = search_assets(search_query)
                 
                 if search_results and search_results.get('total', 0) > 0:
                     st.success(f"✓ Found {search_results['total']} matching asset(s)")
                     
-                    for idx, result_asset in enumerate(search_results['assets'], 1):
-                        with st.expander(f"Asset {idx}: {result_asset['serial_number']}", expanded=(idx == 1)):
-                            display_asset_card(result_asset)
-                            
-                            st.markdown("**Raw Data:**")
-                            st.json(result_asset['raw_data'])
+                    # Display results in table format
+                    assets_list = []
+                    for result_asset in search_results['assets']:
+                        asset_row = {
+                            'Serial Number': result_asset['serial_number'],
+                            'Ingested': result_asset['ingest_timestamp'][:10],
+                            'Source File': result_asset['source_filename']
+                        }
+                        # Add columns from raw_data
+                        if result_asset.get('raw_data'):
+                            for key, value in result_asset['raw_data'].items():
+                                if not key.startswith('_'):
+                                    asset_row[key] = str(value) if value is not None else 'N/A'
+                        assets_list.append(asset_row)
+                    
+                    results_df = pd.DataFrame(assets_list)
+                    st.dataframe(
+                        results_df,
+                        use_container_width=True,
+                        hide_index=True
+                    )
                 else:
-                    st.warning(f"No assets found matching '{search_query}'")
-                    st.info("Try a different search term or upload more data.")
+                    st.warning(f"❌ No assets found matching '{search_query}'")
+                    st.info("💡 Tips:\n- Try a shorter search term\n- Check spelling\n- Upload more data files")
     
-    elif search_button:
-        st.warning("Please enter a search term")
+    elif search_button and not search_query:
+        st.warning("⚠️ Please enter a search term")
     
     # File Management & Filtering Section
     st.markdown("---")
