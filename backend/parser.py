@@ -321,9 +321,10 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
             # Log detected column for debugging
             print(f"Sheet '{sheet_name}': Detected serial column = '{serial_column}', Rows = {len(df)}")
             
-            # Try to detect error_type and status columns (optional)
+            # Try to detect error_type, status, and component columns (optional)
             error_column = None
             status_column = None
+            component_column = None
             
             for col in df.columns:
                 col_lower = col.lower().strip()
@@ -331,6 +332,8 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
                     error_column = col
                 if 'status' in col_lower or 'state' in col_lower:
                     status_column = col
+                if 'component' in col_lower or 'part' in col_lower or 'child' in col_lower:
+                    component_column = col
             
             # Process each row in this sheet
             for idx, row in df.iterrows():
@@ -416,6 +419,67 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
     
     # Log summary
     print(f"Parser summary: Found {len(combined_data)} unique serial numbers from {len(sheet_names)} sheet(s)")
+    
+    # Post-process: Handle component-to-parent relationships
+    # Identify which serial numbers are actually components of other systems
+    component_serials = set()
+    parent_map = {}  # Maps component SN to list of parent SNs
+    
+    for serial_number, record in combined_data.items():
+        raw_data = record['raw_data']
+        
+        # Check if this record has a Component field with parent serial numbers
+        component_field = None
+        for key in raw_data.keys():
+            if not key.startswith('_') and 'component' in key.lower():
+                component_field = key
+                break
+        
+        if component_field and raw_data[component_field]:
+            component_value = str(raw_data[component_field])
+            # Parse component field for serial numbers (split by /, comma, etc.)
+            import re
+            # Extract potential serial numbers (alphanumeric with underscores/dashes)
+            potential_parents = re.findall(r'[A-Za-z0-9_\-]{8,}', component_value)
+            
+            # Check if any of these potential parents exist in our combined_data
+            for potential_parent in potential_parents:
+                if potential_parent in combined_data and potential_parent != serial_number:
+                    # This serial_number is a component of potential_parent
+                    if serial_number not in parent_map:
+                        parent_map[serial_number] = []
+                    parent_map[serial_number].append(potential_parent)
+                    component_serials.add(serial_number)
+    
+    # Redistribute component data to parent systems
+    components_redistributed = 0
+    for component_sn, parent_sns in parent_map.items():
+        if component_sn in combined_data:
+            component_record = combined_data[component_sn]
+            components_redistributed += 1
+            
+            print(f"Redistributing component {component_sn} to parents: {', '.join(parent_sns)}")
+            
+            # Add component data to each parent system
+            for parent_sn in parent_sns:
+                if parent_sn in combined_data:
+                    parent_record = combined_data[parent_sn]
+                    
+                    # Add component info as a special field
+                    if '_components' not in parent_record['raw_data']:
+                        parent_record['raw_data']['_components'] = []
+                    
+                    parent_record['raw_data']['_components'].append({
+                        'component_sn': component_sn,
+                        'component_data': component_record['raw_data']
+                    })
+            
+            # Remove the component from combined_data (it's not a standalone asset)
+            del combined_data[component_sn]
+    
+    if components_redistributed > 0:
+        print(f"✓ Component redistribution: {components_redistributed} component serial numbers moved to parent systems")
+        print(f"Final asset count: {len(combined_data)} (after removing components)")
     
     # Convert to list format and add sheet information to raw_data
     results = []

@@ -497,8 +497,9 @@ def get_key_columns(asset: Dict[str, Any]) -> Dict[str, str]:
     SCHEMA_MAP = {
         'sn': ['sn', 'serial', 'serial_number', 'serialnumber', 'cpu_sn', 'cpu sn', 
                '2d_barcode_sn', '2d barcode', 'system_sn', 'system sn'],
-        'date': ['date', 'fail_date', 'failure_date', 'failure date', 'fail date', 
-                 '日期', '故障日期', 'deploy_date', 'deployment_date'],
+        'date': ['fail date', 'failed date', 'failure date', 'deploy date', 'deployment date',
+                 'slt date', 'slt_date', 'fail_date', 'failed_date', 'failure_date', 'deploy_date',
+                 'rma date', 'rma_date', 'date', 'date code', 'date_code', 'datecode', '日期', '故障日期'],
         'error': ['error', 'error_type', 'symptom', 'fail test', 'fail test case', 
                   '错误', '故障类型', 'issue', 'failure', 'problem'],
         'status': ['status', 'state', 'fa_status', 'fa status', '状态', 'fa状态', 
@@ -521,14 +522,49 @@ def get_key_columns(asset: Dict[str, Any]) -> Dict[str, str]:
     for display_name, field_type in [('Date', 'date'), ('Error', 'error'), 
                                      ('Status', 'status'), ('Component', 'component')]:
         keywords = SCHEMA_MAP.get(field_type, [])
-        for key, value in raw_data.items():
-            if not key.startswith('_') and any(kw in key.lower() for kw in keywords):
-                if field_type == 'status' and value:
-                    # Smart status extraction for messy status fields
-                    result[display_name] = extract_status_from_text(str(value))
-                else:
-                    result[display_name] = str(value) if value else 'N/A'
-                break
+        
+        if field_type == 'date':
+            # Priority-based date field matching with fallback
+            # 1. Try exact matches from high-priority date fields (full datetime preferred)
+            priority_keywords = ['fail date', 'failed date', 'failure date', 'deploy date', 'deployment date', 'slt date']
+            for key, value in raw_data.items():
+                key_lower = key.lower().strip()
+                if not key_lower.startswith('_') and value and any(kw in key_lower for kw in priority_keywords):
+                    result[display_name] = str(value)
+                    break
+            
+            # 2. If no priority match, try all date keywords
+            if result[display_name] == 'N/A':
+                for key, value in raw_data.items():
+                    if not key.startswith('_') and any(kw == key.lower() for kw in keywords):
+                        result[display_name] = str(value) if value else 'N/A'
+                        break
+            
+            # 3. If still no match, try partial matches
+            if result[display_name] == 'N/A':
+                for key, value in raw_data.items():
+                    if not key.startswith('_') and any(kw in key.lower() for kw in keywords):
+                        result[display_name] = str(value) if value else 'N/A'
+                        break
+            
+            # 4. Final fallback: any field containing "date" (but skip if it's just a number like datecode:2451)
+            if result[display_name] == 'N/A':
+                for key, value in raw_data.items():
+                    if not key.startswith('_') and 'date' in key.lower() and value:
+                        # Skip if value looks like just a year/number (e.g., 2451, 2025)
+                        if not (str(value).isdigit() and len(str(value)) <= 4):
+                            result[display_name] = str(value)
+                            break
+        else:
+            # For non-date fields, use original logic
+            for key, value in raw_data.items():
+                if not key.startswith('_') and any(kw in key.lower() for kw in keywords):
+                    if field_type == 'status' and value:
+                        # Smart status extraction for messy status fields
+                        result[display_name] = extract_status_from_text(str(value))
+                    else:
+                        result[display_name] = str(value) if value else 'N/A'
+                    break
     
     return result
 
@@ -739,18 +775,44 @@ if st.session_state.page == "Dashboard":
             if not customer_found:
                 customer_counts['Unknown'] += 1
             
-            # Extract month
+            # Extract month with improved date parsing
             date_str = key_cols.get('Date', '')
+            
             if date_str and date_str != 'N/A':
                 try:
-                    for fmt in ['%Y-%m-%d', '%m/%d/%Y', '%d/%m/%Y', '%Y/%m/%d']:
+                    # Handle concatenated dates (take first one before " | ")
+                    if ' | ' in str(date_str):
+                        date_str = str(date_str).split(' | ')[0].strip()
+                    
+                    # Try various date formats
+                    date_formats = [
+                        '%Y-%m-%d',           # 2025-08-30
+                        '%Y-%m-%d %H:%M:%S',  # 2025-08-30 02:54:00
+                        '%m/%d/%Y',           # 08/30/2025
+                        '%d/%m/%Y',           # 30/08/2025
+                        '%Y/%m/%d',           # 2025/08/30
+                        '%Y_%m',              # 2025_05
+                        '%Y-%m',              # 2025-05
+                    ]
+                    
+                    parsed = False
+                    for fmt in date_formats:
                         try:
-                            date_obj = datetime.strptime(str(date_str).split()[0], fmt)
+                            date_obj = datetime.strptime(str(date_str).strip(), fmt)
                             date_months.append(date_obj.strftime('%Y-%m'))
+                            parsed = True
                             break
                         except:
                             continue
-                except:
+                    
+                    # If still not parsed, try extracting YYYY-MM or YYYY_MM pattern
+                    if not parsed:
+                        import re
+                        match = re.search(r'(\d{4})[-_](\d{2})', str(date_str))
+                        if match:
+                            month_str = f"{match.group(1)}-{match.group(2)}"
+                            date_months.append(month_str)
+                except Exception as e:
                     pass
         
         month_counts = Counter(date_months)
