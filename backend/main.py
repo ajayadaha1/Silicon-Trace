@@ -245,6 +245,7 @@ async def search_assets(
     - Serial numbers (partial match)
     - Error types (partial match)
     - Status (partial match)
+    - All raw_data fields (JSONB search)
     
     Args:
         q: Search query string
@@ -257,11 +258,17 @@ async def search_assets(
     # Build search query - case-insensitive partial matching
     search_pattern = f"%{q}%"
     
+    # For JSONB search, we need to convert to text and search
+    # Use raw SQL for JSONB text search
+    from sqlalchemy import text, cast, String
+    
     stmt = select(Asset).where(
         or_(
             Asset.serial_number.ilike(search_pattern),
             Asset.error_type.ilike(search_pattern),
-            Asset.status.ilike(search_pattern)
+            Asset.status.ilike(search_pattern),
+            # Search in raw_data JSONB by casting to text
+            cast(Asset.raw_data, String).ilike(search_pattern)
         )
     ).limit(limit)
     

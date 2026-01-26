@@ -9,10 +9,111 @@ import requests
 import pandas as pd
 from typing import Optional, Dict, Any, List
 import json
+from langdetect import detect, LangDetectException
+import matplotlib.pyplot as plt
+from datetime import datetime
+from collections import Counter
 
 
 # Configuration
 BACKEND_URL = "http://localhost:8000"
+
+# Common Chinese to English translations for hardware terms
+TRANSLATION_MAP = {
+    # Status terms
+    '已修复': 'Repaired',
+    '待修复': 'Pending Repair',
+    '已测试': 'Tested',
+    '测试中': 'Testing',
+    '已关闭': 'Closed',
+    '打开': 'Open',
+    '进行中': 'In Progress',
+    '待处理': 'Pending',
+    '已完成': 'Completed',
+    '通过': 'Pass',
+    '失败': 'Fail',
+    
+    # Location terms
+    '南通': 'Nantong',
+    '机房': 'Data Center',
+    '是': 'Yes',
+    '否': 'No',
+    
+    # Component terms
+    '内存': 'Memory',
+    '硬盘': 'Hard Drive',
+    '主板': 'Motherboard',
+    '电源': 'Power Supply',
+    '风扇': 'Fan',
+    'CPU': 'CPU',
+    'GPU': 'GPU',
+    
+    # Error/Test terms
+    '故障': 'Failure',
+    '错误': 'Error',
+    '异常': 'Abnormal',
+    '损坏': 'Damaged',
+    '无法启动': 'Cannot Start',
+    '过热': 'Overheating',
+    '老化': 'Aging/Burn-in',
+    '测试': 'Test',
+    '无效': 'Invalid',
+    '缺失': 'Missing',
+    '超时': 'Timeout',
+    '崩溃': 'Crash',
+    
+    # Common phrases
+    '无': 'None',
+    '正常': 'Normal',
+    '不正常': 'Abnormal',
+    '未知': 'Unknown',
+    '待定': 'Pending',
+}
+
+
+def has_chinese(text: str) -> bool:
+    """Check if text contains Chinese characters"""
+    if not text:
+        return False
+    for char in str(text):
+        if '\u4e00' <= char <= '\u9fff':
+            return True
+    return False
+
+
+def translate_text(text: str) -> str:
+    """
+    Translate Chinese text to English using dictionary lookup.
+    Returns original text with translation in parentheses if Chinese detected.
+    """
+    if not text or not isinstance(text, str):
+        return str(text) if text else 'N/A'
+    
+    text_str = str(text).strip()
+    
+    # Check if text contains Chinese characters
+    if not has_chinese(text_str):
+        return text_str
+    
+    # Check if we have a direct translation
+    if text_str in TRANSLATION_MAP:
+        return f"{text_str} ({TRANSLATION_MAP[text_str]})"
+    
+    # Check for partial matches and translate each part
+    translated_parts = []
+    found_translation = False
+    
+    for chinese, english in TRANSLATION_MAP.items():
+        if chinese in text_str:
+            text_str = text_str.replace(chinese, f"{chinese}[{english}]")
+            found_translation = True
+    
+    if found_translation:
+        return f"{text_str} (translated, may not be 100% accurate)"
+    
+    # If Chinese but no translation found
+    return f"{text_str} (Chinese text - translation not in dictionary)"
+
 
 # Page configuration
 st.set_page_config(
@@ -198,6 +299,131 @@ def display_asset_card(asset: Dict[str, Any]):
     
     # Metadata
     col1, col2 = st.columns(2)
+
+
+def display_asset_details_modal(asset: Dict[str, Any]):
+    """Display comprehensive asset details in organized tabs"""
+    
+    # Create tabs for different sections
+    tab1, tab2, tab3, tab4 = st.tabs(["🆔 Identity", "📅 Timeline", "🔧 Technical", "📄 Raw Data"])
+    
+    raw_data = asset.get('raw_data', {})
+    
+    # Tab 1: Identity
+    with tab1:
+        st.subheader("Asset Identity")
+        
+        # Key identifiers
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Serial Number", asset['serial_number'])
+            st.metric("Source File", asset.get('source_filename', 'N/A'))
+        with col2:
+            st.metric("Source Sheet", raw_data.get('_source_sheet', 'N/A'))
+            st.metric("Source Row", raw_data.get('_source_row', 'N/A'))
+        
+        st.markdown("---")
+        
+        # System info
+        identity_fields = {}
+        identity_keywords = ['system', 'cpu', 'sn', 'barcode', 'ppid', 'odm', 'location', '机房', 'vendor']
+        
+        for key, value in raw_data.items():
+            if not key.startswith('_') and any(kw in key.lower() for kw in identity_keywords):
+                identity_fields[key] = value
+        
+        if identity_fields:
+            for key, value in identity_fields.items():
+                st.text(f"{key}: {value}")
+    
+    # Tab 2: Timeline
+    with tab2:
+        st.subheader("Timeline & Lifecycle")
+        
+        # Extract date-related fields
+        date_fields = {}
+        date_keywords = ['date', 'time', 'day', '日期', 'deploy', 'fail', 'rma', 'ship']
+        
+        for key, value in raw_data.items():
+            if not key.startswith('_') and any(kw in key.lower() for kw in date_keywords):
+                date_fields[key] = value
+        
+        if date_fields:
+            for key, value in date_fields.items():
+                st.text(f"{key}: {value}")
+        else:
+            st.info("No timeline information available")
+        
+        # Show ingestion timestamp
+        st.markdown("---")
+        st.caption(f"Ingested: {asset.get('ingest_timestamp', 'N/A')}")
+    
+    # Tab 3: Technical
+    with tab3:
+        st.subheader("Technical Details")
+        
+        # Extract technical fields
+        tech_fields = {}
+        tech_keywords = ['error', 'fail', 'status', 'bios', 'firmware', 'log', 'symptom', 'issue', 
+                        'test', 'code', 'version', '状态', '错误']
+        
+        for key, value in raw_data.items():
+            if not key.startswith('_') and any(kw in key.lower() for kw in tech_keywords):
+                tech_fields[key] = value
+        
+        if tech_fields:
+            for key, value in tech_fields.items():
+                st.markdown(f"**{key}**")
+                st.text(str(value))
+                st.markdown("")
+        else:
+            st.info("No technical details available")
+    
+    # Tab 4: Raw Data
+    with tab4:
+        st.subheader("Raw Excel Data")
+        st.caption("Unmodified data from the source Excel file")
+        st.json(raw_data)
+
+
+def get_key_columns(asset: Dict[str, Any]) -> Dict[str, str]:
+    """Extract the 'Golden 5' columns from an asset"""
+    raw_data = asset.get('raw_data', {})
+    
+    # Schema mapping for bilingual support (Chinese/English)
+    SCHEMA_MAP = {
+        'sn': ['sn', 'serial', 'serial_number', 'serialnumber', 'cpu_sn', 'cpu sn', 
+               '2d_barcode_sn', '2d barcode', 'system_sn', 'system sn'],
+        'date': ['date', 'fail_date', 'failure_date', 'failure date', 'fail date', 
+                 '日期', '故障日期', 'deploy_date', 'deployment_date'],
+        'error': ['error', 'error_type', 'symptom', 'fail test', 'fail test case', 
+                  '错误', '故障类型', 'issue', 'failure', 'problem'],
+        'status': ['status', 'state', 'fa_status', 'fa status', '状态', 'fa状态', 
+                   'fa 状态', 'rma status', 'rma_status'],
+        'component': ['component', 'part', 'module', 'unit', '部件', 'cpu', 'gpu', 
+                      'dimm', 'memory', 'disk', 'drive'],
+        'location': ['location', 'site', 'lab', 'datacenter', 'data center', '机房', 
+                     '南通机房', 'nantong', '是否南通机房', 'room']
+    }
+    
+    result = {
+        'Serial Number': asset['serial_number'],
+        'Date': 'N/A',
+        'Error': asset.get('error_type') or 'N/A',
+        'Status': asset.get('status') or 'N/A',
+        'Component': 'N/A'
+    }
+    
+    # Try to match fields using schema map (no translation here for performance)
+    for display_name, field_type in [('Date', 'date'), ('Error', 'error'), 
+                                     ('Status', 'status'), ('Component', 'component')]:
+        keywords = SCHEMA_MAP.get(field_type, [])
+        for key, value in raw_data.items():
+            if not key.startswith('_') and any(kw in key.lower() for kw in keywords):
+                result[display_name] = str(value) if value else 'N/A'
+                break
+    
+    return result
     with col1:
         st.markdown("**Source File**")
         st.write(asset.get('source_filename', 'N/A'))
@@ -324,97 +550,8 @@ with tab1:
 # TAB 2: Trace Assets
 with tab2:
     st.header("Trace Hardware Assets")
-    st.markdown("Search for assets by serial number or keyword.")
     
-    # Search input
-    # Search input
-    search_query = st.text_input(
-        "🔍 Enter Serial Number or Search Term",
-        placeholder="e.g., ABC12345XYZ",
-        help="Enter a serial number or search term to find assets",
-        key="search_input"
-    )
-    
-    # Search and Clear buttons below the search box
-    btn_col1, btn_col2 = st.columns([1, 1])
-    
-    with btn_col1:
-        search_button = st.button("🔍 Search", type="primary", use_container_width=True)
-    
-    with btn_col2:
-        clear_button = st.button("✖ Clear", type="secondary", use_container_width=True)
-    
-    # Handle clear button
-    if clear_button:
-        st.rerun()
-    
-    # Perform search if query exists and button clicked
-    if search_query and search_button:
-        with st.spinner("Searching..."):
-            # Try exact match first
-            asset = search_asset(search_query)
-            
-            if asset:
-                st.success(f"✓ Found exact match: **{asset['serial_number']}**")
-                
-                # Display asset card
-                display_asset_card(asset)
-                
-                # Display raw data in expandable section
-                st.markdown("---")
-                st.subheader("📋 Raw Data Verification")
-                st.markdown("Original Excel row data (JSON format):")
-                
-                # Pretty print JSON
-                st.json(asset['raw_data'])
-                
-                # Option to download raw data
-                raw_json = json.dumps(asset['raw_data'], indent=2)
-                st.download_button(
-                    label="Download Raw Data (JSON)",
-                    data=raw_json,
-                    file_name=f"{asset['serial_number']}_raw_data.json",
-                    mime="application/json"
-                )
-                
-            else:
-                # Try fuzzy search
-                st.info("🔍 No exact match. Searching for similar assets...")
-                search_results = search_assets(search_query)
-                
-                if search_results and search_results.get('total', 0) > 0:
-                    st.success(f"✓ Found {search_results['total']} matching asset(s)")
-                    
-                    # Display results in table format
-                    assets_list = []
-                    for result_asset in search_results['assets']:
-                        asset_row = {
-                            'Serial Number': result_asset['serial_number'],
-                            'Ingested': result_asset['ingest_timestamp'][:10],
-                            'Source File': result_asset['source_filename']
-                        }
-                        # Add columns from raw_data
-                        if result_asset.get('raw_data'):
-                            for key, value in result_asset['raw_data'].items():
-                                if not key.startswith('_'):
-                                    asset_row[key] = str(value) if value is not None else 'N/A'
-                        assets_list.append(asset_row)
-                    
-                    results_df = pd.DataFrame(assets_list)
-                    st.dataframe(
-                        results_df,
-                        use_container_width=True,
-                        hide_index=True
-                    )
-                else:
-                    st.warning(f"❌ No assets found matching '{search_query}'")
-                    st.info("💡 Tips:\n- Try a shorter search term\n- Check spelling\n- Upload more data files")
-    
-    elif search_button and not search_query:
-        st.warning("⚠️ Please enter a search term")
-    
-    # File Management & Filtering Section
-    st.markdown("---")
+    # Section 1: File Management (TOP)
     st.subheader("📂 File Management & Filtering")
     
     # Initialize selected_files
@@ -461,40 +598,541 @@ with tab2:
                             st.success(f"✓ {result['message']}")
                             st.rerun()
     
-    # All Assets Table
+    # Section 2: Search (MIDDLE)
     st.markdown("---")
+    st.subheader("🔍 Search Assets")
+    st.markdown("Search for assets by serial number or keyword.")
+    
+    # Initialize search query in session state if not exists
+    if 'search_query' not in st.session_state:
+        st.session_state.search_query = ""
+    
+    # Search input (without key to avoid modification error)
+    search_query = st.text_input(
+        "Enter Serial Number or Search Term",
+        value=st.session_state.search_query,
+        placeholder="e.g., ABC12345XYZ or ALIBABA",
+        help="Enter a serial number or search term to filter assets below"
+    )
+    
+    # Search and Clear buttons below the search box
+    btn_col1, btn_col2 = st.columns([1, 1])
+    
+    with btn_col1:
+        search_button = st.button("🔍 Filter", type="primary", use_container_width=True)
+    
+    with btn_col2:
+        clear_button = st.button("✖ Clear", type="secondary", use_container_width=True)
+    
+    # Handle clear button - must be before using search_query
+    if clear_button:
+        st.session_state.search_query = ""
+        st.rerun()
+    
+    # Update session state with current search query
+    st.session_state.search_query = search_query
+    
+    # Show active filter status
+    if search_query:
+        st.info(f"🔍 Active filter: **{search_query}** (showing filtered results in table below)")
+    
+    # Section 3: All Assets Table/Aggregate View (BOTTOM)
+    st.markdown("---")
+    
+    # View mode toggle
+    view_mode = st.radio(
+        "View Mode",
+        options=["📋 List View", "📄 Complete View", "📊 Aggregate View", "📈 Graph View"],
+        horizontal=True,
+        help="Switch between simplified list, complete data, aggregated summary, and visual graphs"
+    )
+    
     st.subheader("All Assets" if not selected_files else f"Assets from {len(selected_files)} file(s)")
     
     with st.spinner("Loading assets..."):
+        # Get all assets or filtered by source files
         data = get_assets_filtered(source_files=selected_files)
         
+        # Apply search filter if query exists
+        if search_query and data and data.get('total', 0) > 0:
+            all_assets = data['assets']
+            filtered_assets = []
+            search_lower = search_query.lower()
+            
+            for asset in all_assets:
+                # Check if search term matches serial number, error_type, status
+                if search_lower in asset.get('serial_number', '').lower():
+                    filtered_assets.append(asset)
+                    continue
+                if asset.get('error_type') and search_lower in asset.get('error_type', '').lower():
+                    filtered_assets.append(asset)
+                    continue
+                if asset.get('status') and search_lower in asset.get('status', '').lower():
+                    filtered_assets.append(asset)
+                    continue
+                
+                # Check raw_data fields
+                raw_data = asset.get('raw_data', {})
+                for key, value in raw_data.items():
+                    if value and search_lower in str(value).lower():
+                        filtered_assets.append(asset)
+                        break
+            
+            # Update data with filtered results
+            data = {
+                'total': len(filtered_assets),
+                'assets': filtered_assets
+            }
+            
+            if len(filtered_assets) == 0:
+                st.warning(f"❌ No assets found matching '{search_query}'")
+            else:
+                st.success(f"✓ Found {len(filtered_assets)} asset(s) matching '{search_query}'")
+        
         if data and data.get('total', 0) > 0:
-            # Create a dynamic table with ALL columns from raw_data
-            assets_list = []
-            for a in data['assets']:
-                # Start with basic info
-                asset_row = {
-                    'Serial Number': a['serial_number'],
-                    'Ingested': a['ingest_timestamp'][:10],
-                    'Source File': a['source_filename']
-                }
-                # Add all columns from raw_data
-                if a.get('raw_data'):
-                    for key, value in a['raw_data'].items():
-                        # Skip metadata fields
-                        if not key.startswith('_'):
-                            # Convert all values to strings to avoid Arrow type errors
-                            asset_row[key] = str(value) if value is not None else 'N/A'
-                assets_list.append(asset_row)
+            assets = data['assets']
             
-            assets_df = pd.DataFrame(assets_list)
+            if view_mode == "📋 List View":
+                # List View: Show Golden 5 columns with row selection
+                st.caption(f"Showing {len(assets)} assets - Click on any row to see full details")
+                
+                # Create table with only key columns
+                table_data = []
+                for idx, asset in enumerate(assets):
+                    key_cols = get_key_columns(asset)
+                    table_data.append(key_cols)
+                
+                df = pd.DataFrame(table_data)
+                
+                # Display table with row selection
+                selected = st.dataframe(
+                    df,
+                    width='stretch',
+                    hide_index=True,
+                    on_select="rerun",
+                    selection_mode="single-row",
+                    key="asset_table"
+                )
+                
+                # Show dialog when a row is selected
+                if selected.selection.rows:
+                    selected_idx = selected.selection.rows[0]
+                    selected_asset = assets[selected_idx]
+                    
+                    @st.dialog(f"Asset Details: {selected_asset['serial_number']}", width="large")
+                    def show_asset_details():
+                        raw_data = selected_asset.get('raw_data', {})
+                        
+                        st.info("ℹ️ Chinese text is automatically translated (may not be 100% accurate)")
+                        
+                        # Create tabs in dialog
+                        tab1, tab2, tab3, tab4 = st.tabs(["🆔 Identity", "📅 Timeline", "🔧 Technical", "📄 Raw Data"])
+                        
+                        # Tab 1: Identity
+                        with tab1:
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.metric("Serial Number", selected_asset['serial_number'])
+                                st.metric("Source File", selected_asset.get('source_filename', 'N/A'))
+                            with col2:
+                                st.metric("Source Sheet", raw_data.get('_source_sheet', 'N/A'))
+                                st.metric("Source Row", raw_data.get('_source_row', 'N/A'))
+                            
+                            st.markdown("---")
+                            st.markdown("**System Information**")
+                            
+                            identity_keywords = ['system', 'cpu', 'sn', 'barcode', 'ppid', 'odm', 'location', '机房', 'vendor']
+                            for key, value in raw_data.items():
+                                if not key.startswith('_') and any(kw in key.lower() for kw in identity_keywords):
+                                    translated_value = translate_text(value) if value else 'N/A'
+                                    st.text(f"{key}: {translated_value}")
+                        
+                        # Tab 2: Timeline
+                        with tab2:
+                            date_keywords = ['date', 'time', 'day', '日期', 'deploy', 'fail', 'rma', 'ship']
+                            date_found = False
+                            
+                            for key, value in raw_data.items():
+                                if not key.startswith('_') and any(kw in key.lower() for kw in date_keywords):
+                                    translated_value = translate_text(value) if value else 'N/A'
+                                    st.metric(key, translated_value)
+                                    date_found = True
+                            
+                            if not date_found:
+                                st.info("No timeline information available")
+                            
+                            st.markdown("---")
+                            st.caption(f"Ingested: {selected_asset.get('ingest_timestamp', 'N/A')}")
+                        
+                        # Tab 3: Technical
+                        with tab3:
+                            tech_keywords = ['error', 'fail', 'status', 'bios', 'firmware', 'log', 'symptom', 'issue', 
+                                           'test', 'code', 'version', '状态', '错误']
+                            tech_found = False
+                            
+                            for key, value in raw_data.items():
+                                if not key.startswith('_') and any(kw in key.lower() for kw in tech_keywords):
+                                    st.markdown(f"**{key}**")
+                                    translated_value = translate_text(value) if value else 'N/A'
+                                    st.text(str(translated_value))
+                                    st.markdown("")
+                                    tech_found = True
+                            
+                            if not tech_found:
+                                st.info("No technical details available")
+                        
+                        # Tab 4: Raw Data
+                        with tab4:
+                            st.json(raw_data)
+                    
+                    show_asset_details()
+
+
+            elif view_mode == "📄 Complete View":
+                # Complete View: Show all columns from raw_data
+                st.caption(f"Showing {len(assets)} assets with all available columns - Click on any row to see full details")
+                
+                # Create a dynamic table with ALL columns from raw_data
+                assets_list = []
+                for a in assets:
+                    # Start with basic info
+                    asset_row = {
+                        'Serial Number': str(a['serial_number']),
+                        'Ingested': str(a['ingest_timestamp'][:10]) if a.get('ingest_timestamp') else 'N/A',
+                        'Source File': str(a.get('source_filename', 'N/A'))
+                    }
+                    # Add all columns from raw_data
+                    if a.get('raw_data'):
+                        for key, value in a['raw_data'].items():
+                            # Skip metadata fields
+                            if not key.startswith('_'):
+                                # Convert all values to strings to avoid Arrow type errors
+                                asset_row[key] = str(value) if value is not None else 'N/A'
+                    assets_list.append(asset_row)
+                
+                # Create DataFrame and explicitly convert all columns to string type
+                assets_df = pd.DataFrame(assets_list)
+                for col in assets_df.columns:
+                    assets_df[col] = assets_df[col].astype(str)
+                
+                # Display table with row selection
+                selected = st.dataframe(
+                    assets_df,
+                    width='stretch',
+                    hide_index=True,
+                    on_select="rerun",
+                    selection_mode="single-row",
+                    key="complete_asset_table"
+                )
+                
+                # Show dialog when a row is selected
+                if selected.selection.rows:
+                    selected_idx = selected.selection.rows[0]
+                    selected_asset = assets[selected_idx]
+                    
+                    @st.dialog(f"Asset Details: {selected_asset['serial_number']}", width="large")
+                    def show_complete_asset_details():
+                        raw_data = selected_asset.get('raw_data', {})
+                        
+                        st.info("ℹ️ Chinese text is automatically translated (may not be 100% accurate)")
+                        
+                        # Create tabs in dialog
+                        tab1, tab2, tab3, tab4 = st.tabs(["🆔 Identity", "📅 Timeline", "🔧 Technical", "📄 Raw Data"])
+                        
+                        # Tab 1: Identity
+                        with tab1:
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.metric("Serial Number", selected_asset['serial_number'])
+                                st.metric("Source File", selected_asset.get('source_filename', 'N/A'))
+                            with col2:
+                                st.metric("Source Sheet", raw_data.get('_source_sheet', 'N/A'))
+                                st.metric("Source Row", raw_data.get('_source_row', 'N/A'))
+                            
+                            st.markdown("---")
+                            st.markdown("**System Information**")
+                            
+                            identity_keywords = ['system', 'cpu', 'sn', 'barcode', 'ppid', 'odm', 'location', '机房', 'vendor']
+                            for key, value in raw_data.items():
+                                if not key.startswith('_') and any(kw in key.lower() for kw in identity_keywords):
+                                    translated_value = translate_text(value) if value else 'N/A'
+                                    st.text(f"{key}: {translated_value}")
+                        
+                        # Tab 2: Timeline
+                        with tab2:
+                            date_keywords = ['date', 'time', 'day', '日期', 'deploy', 'fail', 'rma', 'ship']
+                            date_found = False
+                            
+                            for key, value in raw_data.items():
+                                if not key.startswith('_') and any(kw in key.lower() for kw in date_keywords):
+                                    translated_value = translate_text(value) if value else 'N/A'
+                                    st.metric(key, translated_value)
+                                    date_found = True
+                            
+                            if not date_found:
+                                st.info("No timeline information available")
+                            
+                            st.markdown("---")
+                            st.caption(f"Ingested: {selected_asset.get('ingest_timestamp', 'N/A')}")
+                        
+                        # Tab 3: Technical
+                        with tab3:
+                            tech_keywords = ['error', 'fail', 'status', 'bios', 'firmware', 'log', 'symptom', 'issue', 
+                                           'test', 'code', 'version', '状态', '错误']
+                            tech_found = False
+                            
+                            for key, value in raw_data.items():
+                                if not key.startswith('_') and any(kw in key.lower() for kw in tech_keywords):
+                                    st.markdown(f"**{key}**")
+                                    translated_value = translate_text(value) if value else 'N/A'
+                                    st.text(str(translated_value))
+                                    st.markdown("")
+                                    tech_found = True
+                            
+                            if not tech_found:
+                                st.info("No technical details available")
+                        
+                        # Tab 4: Raw Data
+                        with tab4:
+                            st.json(raw_data)
+                    
+                    show_complete_asset_details()
+
             
-            st.success(f"✓ Loaded {len(assets_df)} assets")
-            st.dataframe(
-                assets_df,
-                use_container_width=True,
-                hide_index=True
-            )
+            elif view_mode == "📊 Aggregate View":
+                # Aggregate View: Group by error type
+                st.caption("Assets grouped by error type")
+                
+                # Group assets by error type
+                from collections import defaultdict
+                groups = defaultdict(list)
+                
+                for asset in assets:
+                    key_cols = get_key_columns(asset)
+                    error_type = key_cols['Error']
+                    groups[error_type].append(asset)
+                
+                # Sort by count (descending)
+                sorted_groups = sorted(groups.items(), key=lambda x: len(x[1]), reverse=True)
+                
+                # Display groups
+                for error_type, group_assets in sorted_groups:
+                    with st.expander(f"**{error_type}** ({len(group_assets)} assets)"):
+                        # Show serial numbers in this group
+                        sn_list = [asset['serial_number'] for asset in group_assets]
+                        
+                        col1, col2 = st.columns([3, 1])
+                        with col1:
+                            st.write(", ".join(sn_list[:10]))
+                            if len(sn_list) > 10:
+                                st.caption(f"... and {len(sn_list) - 10} more")
+                        
+                        with col2:
+                            st.metric("Total Count", len(group_assets))
+                        
+                        # Show detailed list button
+                        if st.button(f"Show all {len(group_assets)} assets", key=f"show_{error_type}"):
+                            st.markdown("**Assets in this group:**")
+                            group_table = []
+                            for ga in group_assets:
+                                key_cols = get_key_columns(ga)
+                                group_table.append(key_cols)
+                            
+                            group_df = pd.DataFrame(group_table)
+                            st.dataframe(
+                                group_df[['Serial Number', 'Date', 'Status', 'Component']],
+                                width='stretch',
+                                hide_index=True
+                            )
+            
+            elif view_mode == "📈 Graph View":
+                # Graph View: Show visualizations
+                st.caption("Visual analysis of asset data")
+                
+                # Extract data for graphs
+                error_counts = Counter()
+                status_counts = Counter()
+                customer_counts = Counter()
+                date_months = []
+                
+                for asset in assets:
+                    key_cols = get_key_columns(asset)
+                    raw_data = asset.get('raw_data', {})
+                    
+                    # Count errors
+                    error_type = key_cols.get('Error', 'Unknown')
+                    if error_type and error_type != 'N/A':
+                        error_counts[error_type] += 1
+                    
+                    # Count status
+                    status = key_cols.get('Status', 'Unknown')
+                    if status and status != 'N/A':
+                        status_counts[status] += 1
+                    
+                    # Intelligently extract customer from raw_data
+                    customer_keywords = ['customer', 'client', 'end_customer', 'end customer', 
+                                       'customer_name', 'customer name', '客户', 'cust']
+                    customer_found = False
+                    for key, value in raw_data.items():
+                        if not key.startswith('_') and value and any(kw in key.lower() for kw in customer_keywords):
+                            customer_name = str(value).strip().upper()
+                            if customer_name and customer_name not in ['N/A', 'NA', 'NONE', '']:
+                                customer_counts[customer_name] += 1
+                                customer_found = True
+                                break
+                    
+                    if not customer_found:
+                        customer_counts['Unknown'] += 1
+                    
+                    # Extract month from date
+                    date_str = key_cols.get('Date', '')
+                    if date_str and date_str != 'N/A':
+                        try:
+                            # Try different date formats
+                            for fmt in ['%Y-%m-%d', '%m/%d/%Y', '%d/%m/%Y', '%Y/%m/%d']:
+                                try:
+                                    date_obj = datetime.strptime(str(date_str).split()[0], fmt)
+                                    date_months.append(date_obj.strftime('%Y-%m'))
+                                    break
+                                except:
+                                    continue
+                        except:
+                            pass
+                
+                month_counts = Counter(date_months)
+                
+                # Create graphs in 2-column layout
+                col1, col2 = st.columns(2)
+                
+                # Graph 1: Failures by Error Type
+                with col1:
+                    st.subheader("📊 Failures by Error Type")
+                    if error_counts:
+                        # Sort by count and take top 10
+                        top_errors = dict(error_counts.most_common(10))
+                        
+                        fig, ax = plt.subplots(figsize=(10, 6))
+                        bars = ax.barh(list(top_errors.keys()), list(top_errors.values()), color='#1f77b4')
+                        ax.set_xlabel('Count')
+                        ax.set_title('Top 10 Error Types')
+                        ax.grid(axis='x', alpha=0.3)
+                        
+                        # Add value labels on bars
+                        for bar in bars:
+                            width = bar.get_width()
+                            ax.text(width, bar.get_y() + bar.get_height()/2, 
+                                   f'{int(width)}', ha='left', va='center', fontsize=9)
+                        
+                        plt.tight_layout()
+                        st.pyplot(fig)
+                        plt.close()
+                    else:
+                        st.info("No error data available")
+                
+                # Graph 2: Assets by Month
+                with col2:
+                    st.subheader("📅 Assets by Month")
+                    if month_counts:
+                        # Sort by month
+                        sorted_months = dict(sorted(month_counts.items()))
+                        
+                        fig, ax = plt.subplots(figsize=(10, 6))
+                        bars = ax.bar(range(len(sorted_months)), list(sorted_months.values()), color='#2ca02c')
+                        ax.set_xticks(range(len(sorted_months)))
+                        ax.set_xticklabels(list(sorted_months.keys()), rotation=45, ha='right')
+                        ax.set_ylabel('Count')
+                        ax.set_title('Assets by Month')
+                        ax.grid(axis='y', alpha=0.3)
+                        
+                        # Add value labels on bars
+                        for i, bar in enumerate(bars):
+                            height = bar.get_height()
+                            ax.text(bar.get_x() + bar.get_width()/2, height,
+                                   f'{int(height)}', ha='center', va='bottom', fontsize=9)
+                        
+                        plt.tight_layout()
+                        st.pyplot(fig)
+                        plt.close()
+                    else:
+                        st.info("No date data available")
+                
+                # Second row of graphs
+                col3, col4 = st.columns(2)
+                
+                # Graph 3: Assets by Status
+                with col3:
+                    st.subheader("🔧 Assets by Status")
+                    if status_counts:
+                        # Sort by count
+                        top_status = dict(status_counts.most_common(10))
+                        
+                        fig, ax = plt.subplots(figsize=(10, 6))
+                        bars = ax.barh(list(top_status.keys()), list(top_status.values()), color='#ff7f0e')
+                        ax.set_xlabel('Count')
+                        ax.set_title('Top 10 Status Types')
+                        ax.grid(axis='x', alpha=0.3)
+                        
+                        # Add value labels on bars
+                        for bar in bars:
+                            width = bar.get_width()
+                            ax.text(width, bar.get_y() + bar.get_height()/2,
+                                   f'{int(width)}', ha='left', va='center', fontsize=9)
+                        
+                        plt.tight_layout()
+                        st.pyplot(fig)
+                        plt.close()
+                    else:
+                        st.info("No status data available")
+                
+                # Graph 4: Assets by Customer
+                with col4:
+                    st.subheader("🏢 Assets by Customer")
+                    if customer_counts and len(customer_counts) > 1 or (len(customer_counts) == 1 and 'Unknown' not in customer_counts):
+                        # Sort by count and exclude 'Unknown' if we have other customers
+                        filtered_customers = {k: v for k, v in customer_counts.items() if k != 'Unknown'} if len(customer_counts) > 1 else customer_counts
+                        
+                        if filtered_customers:
+                            # Sort by count and take top 10
+                            sorted_customers = sorted(filtered_customers.items(), key=lambda x: x[1], reverse=True)[:10]
+                            customers = [x[0] for x in sorted_customers]
+                            counts = [x[1] for x in sorted_customers]
+                            
+                            fig, ax = plt.subplots(figsize=(10, 6))
+                            bars = ax.barh(customers, counts, color='#9467bd')  # Purple color
+                            ax.set_xlabel('Count')
+                            ax.set_title('Top 10 Customers')
+                            ax.invert_yaxis()
+                            
+                            # Add count labels on the bars
+                            for bar in bars:
+                                width = bar.get_width()
+                                ax.text(width, bar.get_y() + bar.get_height()/2., 
+                                       f'{int(width)}',
+                                       ha='left', va='center', fontsize=9, 
+                                       bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
+                            
+                            plt.tight_layout()
+                            st.pyplot(fig)
+                            plt.close()
+                        else:
+                            st.info("No customer data available")
+                    else:
+                        st.info("No customer data available - check for columns like 'end_customer', 'customer', 'client'")
+                
+                # Summary statistics
+                st.markdown("---")
+                st.subheader("📈 Summary Statistics")
+                stat_col1, stat_col2, stat_col3, stat_col4 = st.columns(4)
+                
+                with stat_col1:
+                    st.metric("Total Assets", len(assets))
+                with stat_col2:
+                    st.metric("Unique Errors", len(error_counts))
+                with stat_col3:
+                    st.metric("Status Types", len(status_counts))
+                with stat_col4:
+                    st.metric("Customers", len([k for k in customer_counts.keys() if k != 'Unknown']))
+        
         else:
             if selected_files:
                 st.info(f"No assets found from selected file(s).")
