@@ -7,7 +7,7 @@ services:
       POSTGRES_PASSWORD: silicon_pass
       POSTGRES_DB: silicon_trace_db
     ports:
-      - "5432:5432"
+      - "5432:5432"  # For local development access
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -15,6 +15,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - silicon_trace_network
 
   backend:
     build:
@@ -26,7 +28,7 @@ services:
       HOST: 0.0.0.0
       PORT: 8000
     ports:
-      - "8000:8000"
+      - "8000:8000"  # For local development - can run Streamlit outside Docker
     volumes:
       - ./backend:/app
       - ./data:/app/data
@@ -34,6 +36,28 @@ services:
       postgres:
         condition: service_healthy
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    networks:
+      - silicon_trace_network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: silicon_trace_frontend
+    environment:
+      API_URL: http://localhost:8000  # For standalone mode; nginx uses /api
+    ports:
+      - "8501:8501"  # For local development access
+    volumes:
+      - ./frontend:/app
+    depends_on:
+      - backend
+    networks:
+      - silicon_trace_network
 
 volumes:
   postgres_data:
+
+networks:
+  silicon_trace_network:
+    driver: bridge

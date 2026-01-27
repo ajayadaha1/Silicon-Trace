@@ -28,7 +28,8 @@ from pptx_parser import parse_pptx
 app = FastAPI(
     title="Silicon Trace API",
     description="Hardware Failure Analysis Tool - Backend API",
-    version="3.0.0"
+    version="3.0.0",
+    root_path="/api"
 )
 
 # Configure CORS for frontend access

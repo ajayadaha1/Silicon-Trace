@@ -4,6 +4,7 @@ Silicon Trace - Hardware Failure Analysis Dashboard
 A Streamlit frontend for ingesting Excel files and tracing hardware assets.
 """
 
+import os
 import streamlit as st
 import requests
 import pandas as pd
@@ -27,7 +28,7 @@ pd.set_option('display.max_rows', 10000)
 
 
 # Configuration
-BACKEND_URL = "http://localhost:8000"
+BACKEND_URL = os.getenv("API_URL", "http://localhost:8000")
 
 # Common Chinese to English translations for hardware terms
 TRANSLATION_MAP = {
@@ -124,15 +125,6 @@ def translate_text(text: str) -> str:
     
     # If Chinese but no translation found
     return f"{text_str} (Chinese text - translation not in dictionary)"
-
-
-# Page configuration
-st.set_page_config(
-    page_title="Silicon Trace",
-    page_icon="🔍",
-    layout="wide",
-    initial_sidebar_state="auto"
-)
 
 # Initialize session state for page navigation
 if 'page' not in st.session_state:
