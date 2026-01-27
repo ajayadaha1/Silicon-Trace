@@ -392,11 +392,11 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
             
             # Read with no duplicate column handling - we'll merge them ourselves
             # First, try to detect multi-row headers
-            df_test = pd.read_excel(file_path, sheet_name=sheet_name, nrows=5)
+            df_test = pd.read_excel(file_path, sheet_name=sheet_name, nrows=5, header=None)
             
             # Check if first few rows contain header-like data
             # Multi-row headers often have merged cells or repeated patterns
-            header_row = 0
+            header_rows = []
             for row_idx in range(min(4, len(df_test))):
                 row_data = df_test.iloc[row_idx]
                 # Count how many values look like headers (contain common keywords)
@@ -408,19 +408,26 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
                         if any(kw in val_str for kw in ['serial', 'sn', 'number', 'customer', 'date', 
                                                          'status', 'error', 'failure', 'ticket', 'priority',
                                                          'bios', 'wafer', 'faili', 'ccd', 'ttf', 'ate', 'slt',
-                                                         'platform', 'mfg']):
+                                                         'tier', 'platform', 'mfg', 'afhc', 'ceslt', 'osv',
+                                                         'diag', 'charz', 'repro', 'kvm']):
                             header_like_count += 1
                 
-                # If more than 30% of cells look like headers, this might be the real header row
+                # If more than 30% of cells look like headers, this is a header row
                 if header_like_count >= len(df_test.columns) * 0.3:
-                    header_row = row_idx
-                    break
+                    header_rows.append(row_idx)
             
-            # Re-read with correct header row
-            if header_row > 0:
-                print(f"Sheet '{sheet_name}': Detected multi-row header at row {header_row}")
-                df = pd.read_excel(file_path, sheet_name=sheet_name, header=header_row)
+            # Handle multi-row headers
+            if len(header_rows) > 1:
+                # Multi-row header detected - use the LAST header row (most specific)
+                # This handles cases like: Row 0 = "Tier0 - Suzhou", Row 1 = "L1", "L2", "ATE"
+                # We want Row 1 (the actual test names), not Row 0 (the category)
+                print(f"Sheet '{sheet_name}': Detected multi-row header (rows {header_rows}), using row {header_rows[-1]}")
+                df = pd.read_excel(file_path, sheet_name=sheet_name, header=header_rows[-1])
+            elif len(header_rows) == 1:
+                print(f"Sheet '{sheet_name}': Detected single header at row {header_rows[0]}")
+                df = pd.read_excel(file_path, sheet_name=sheet_name, header=header_rows[0])
             else:
+                # No header rows detected, assume row 0
                 df = pd.read_excel(file_path, sheet_name=sheet_name)
             
             # Log columns for debugging duplicate detection
@@ -462,6 +469,11 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
             for idx, row in df.iterrows():
                 # Get serial number (required)
                 serial_number = str(row[serial_column]).strip()
+                
+                # Handle multi-line serial numbers (take only the first line)
+                # Some Excel files have multiple serial numbers in one cell separated by newlines
+                if '\n' in serial_number:
+                    serial_number = serial_number.split('\n')[0].strip()
                 
                 # Skip rows with invalid serial numbers
                 if not serial_number or serial_number.lower() in ['nan', 'none', '', 'null', 'nat', 'n/a', 'na', 'tbd', 'tbc']:

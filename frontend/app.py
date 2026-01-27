@@ -2071,6 +2071,117 @@ elif st.session_state.page == "Analytics":
         st.markdown("---")
         st.caption(f"Assets grouped by {group_by.lower()}")
         
+        # Tier Analysis validation and logging
+        if group_by == "Tier Analysis":
+            import logging
+            logging.basicConfig(level=logging.INFO)
+            logger = logging.getLogger(__name__)
+            
+            # First, validate if tier columns exist in any asset
+            tier_keywords = ['l1', 'l2', 'slt', 'ceslt', 'osv', 'afhc', 'tier0', 'tier1', 'tier2', 
+                           'tier3', 'tier4', 'tier5', 'fs1', 'fs2', 'diag', 'aft', 'wl:', 'hdrt', 'difect']
+            
+            logger.info("=" * 80)
+            logger.info("TIER ANALYSIS VALIDATION STARTING")
+            logger.info(f"Total assets to analyze: {len(assets)}")
+            
+            # Check if any assets have tier columns and track which files have tier data
+            assets_with_tiers = 0
+            assets_without_tiers = 0
+            all_detected_tier_cols = set()
+            files_with_tiers = set()
+            files_without_tiers = set()
+            
+            for asset in assets:
+                raw_data = asset.get('raw_data', {})
+                asset_tier_cols = []
+                
+                # Get filename from asset
+                filename = asset.get('_filename', 'Unknown File')
+                
+                for key in raw_data.keys():
+                    if not key.startswith('_'):
+                        key_lower = key.lower().strip()
+                        
+                        # Skip date columns
+                        if any(x in key_lower for x in ['date', 'timestamp', 'time', 'mfg', 'wafer', 'ship', 'receive']):
+                            continue
+                        
+                        # Check for tier columns
+                        is_tier = False
+                        for kw in tier_keywords:
+                            if kw in key_lower:
+                                is_tier = True
+                                break
+                        
+                        # Special handling for 'ate'
+                        if not is_tier and ('ate' in key_lower or ' ate ' in key_lower):
+                            if 'date' not in key_lower and 'update' not in key_lower and 'create' not in key_lower:
+                                is_tier = True
+                        
+                        if is_tier:
+                            asset_tier_cols.append(key)
+                            all_detected_tier_cols.add(key)
+                
+                if asset_tier_cols:
+                    assets_with_tiers += 1
+                    files_with_tiers.add(filename)
+                else:
+                    assets_without_tiers += 1
+                    files_without_tiers.add(filename)
+            
+            logger.info(f"Assets with tier columns: {assets_with_tiers}/{len(assets)}")
+            logger.info(f"Assets without tier columns: {assets_without_tiers}/{len(assets)}")
+            logger.info(f"Detected tier columns across all assets: {sorted(all_detected_tier_cols)}")
+            logger.info(f"Files with tier data: {sorted(files_with_tiers)}")
+            logger.info(f"Files without tier data: {sorted(files_without_tiers)}")
+            
+            # Show messages based on tier data availability
+            # Check if we truly have multiple different files (not all "Unknown File")
+            has_multiple_files = len(files_with_tiers | files_without_tiers) > 1 or (
+                len(files_with_tiers) == 1 and len(files_without_tiers) == 1 and 
+                files_with_tiers != files_without_tiers
+            )
+            
+            if assets_with_tiers == 0:
+                # No tier data at all
+                st.error("⚠️ Tier Analysis Not Available")
+                st.info(
+                    "No tier-related columns detected in any of the uploaded files. "
+                    "Tier Analysis requires columns with test tier information such as:\n"
+                    "- L1, L2, ATE, SLT, CESLT, OSV\n"
+                    "- Tier0, Tier1, Tier2, Tier3, Tier4, Tier5\n"
+                    "- ATE FT1, ATE FT2, SLT1, SLT2, FS1, FS2\n"
+                    "- AFHC, WL:, Diag\n\n"
+                    "Please upload a file with tier test data to use this feature."
+                )
+                logger.warning("TIER ANALYSIS ABORTED: No tier columns found")
+            elif assets_without_tiers > 0 and has_multiple_files:
+                # Some files/sheets have tier data, some don't (only show if truly different files)
+                st.warning(f"⚠️ Partial Tier Data Available")
+                st.info(
+                    f"📊 **{assets_with_tiers} assets** have tier data and will be analyzed.\n\n"
+                    f"⚠️ **{assets_without_tiers} assets** do not have tier columns and will be grouped as '❓ No Tier Data'.\n\n"
+                    f"**Sources WITH tier data:** {', '.join(sorted(files_with_tiers))}\n\n"
+                    f"**Sources WITHOUT tier data:** {', '.join(sorted(files_without_tiers))}"
+                )
+                logger.info(f"TIER ANALYSIS PROCEEDING with partial data: {assets_with_tiers} assets with tiers, {assets_without_tiers} without")
+            elif assets_without_tiers > 0:
+                # Same file but some assets don't have tier data (likely different rows/sheets)
+                st.info(
+                    f"📊 Analyzing **{assets_with_tiers} assets** with tier data.\n\n"
+                    f"ℹ️ {assets_without_tiers} asset(s) do not have tier columns and will be grouped as '❓ No Tier Data'."
+                )
+                logger.info(f"TIER ANALYSIS PROCEEDING: {assets_with_tiers} assets with tiers, {assets_without_tiers} without")
+            else:
+                # All assets have tier data
+                st.success(f"✅ All {assets_with_tiers} assets have tier data ({len(all_detected_tier_cols)} tier columns detected)")
+                logger.info(f"TIER ANALYSIS PROCEEDING with {assets_with_tiers} assets (all have tier data)")
+        
+        # Stop here if tier analysis with no data
+        if group_by == "Tier Analysis" and assets_with_tiers == 0:
+            st.stop()
+        
         # Group assets by selected field
         from collections import defaultdict
         groups = defaultdict(list)
@@ -2140,39 +2251,210 @@ elif st.session_state.page == "Analytics":
                 # Detect tier columns and analyze test flow progression
                 # Look for tier-related columns: L1, L2, ATE, SLT, Tier0-5, etc.
                 tier_columns = []
-                tier_keywords = ['l1', 'l2', 'ate', 'slt', 'ceslt', 'osv', 'tier0', 'tier1', 'tier2', 
-                               'tier3', 'tier4', 'tier5', 'fs1', 'fs2', 'diag', 'aft', 'wl:']
+                tier_keywords = ['l1', 'l2', 'slt', 'ceslt', 'osv', 'afhc', 'tier0', 'tier1', 'tier2',
+                               'tier3', 'tier4', 'tier5', 'tier 0', 'tier 1', 'tier 2', 'tier 3', 'tier 4', 'tier 5',
+                               'ft1', 'ft2', 'fs1', 'fs2', 'diag', 'aft', 'wl:', 'hdrt', 'difect', 
+                               'per core', 'charz', 'shak', 'kvm']
+                
+                serial = key_cols.get('Serial Number', 'Unknown')
+                logger.info(f"\n--- Processing Asset: {serial} ---")
                 
                 for key in raw_data.keys():
                     if not key.startswith('_'):
                         key_lower = key.lower().strip()
-                        # Check if this is a tier column
-                        if any(kw in key_lower for kw in tier_keywords):
-                            tier_columns.append((key, raw_data.get(key)))
+                        
+                        # Explicitly exclude date/time/mfg columns
+                        if any(x in key_lower for x in ['date', 'timestamp', 'time', 'mfg', 'wafer', 'ship', 'receive']):
+                            logger.debug(f"  Skipping date column: {key}")
+                            continue  # Skip all date/time/manufacturing date columns
+                        
+                        # Exclude status/result columns (not actual test tiers)
+                        if any(x in key_lower for x in ['status', 'result', 'plan', 'comment', 'debug', 'repro status']):
+                            logger.debug(f"  Skipping status column: {key}")
+                            continue
+                        
+                        # Check if this is a tier column using flexible matching
+                        is_tier = False
+                        for kw in tier_keywords:
+                            if kw in key_lower:
+                                is_tier = True
+                                logger.debug(f"  Tier column detected (keyword '{kw}'): {key}")
+                                break
+                        
+                        # Special handling for 'ate' - must be word boundary to avoid matching 'date'
+                        if not is_tier and ('ate' in key_lower or ' ate ' in key_lower or key_lower.startswith('ate ') or key_lower.endswith(' ate') or key_lower == 'ate'):
+                            # Make sure it's not part of 'date', 'update', 'create', etc.
+                            if 'date' not in key_lower and 'update' not in key_lower and 'create' not in key_lower:
+                                is_tier = True
+                                logger.debug(f"  Tier column detected (ATE match): {key}")
+                        
+                        if is_tier:
+                            tier_value = raw_data.get(key)
+                            tier_columns.append((key, tier_value))
+                            logger.info(f"  {key}: '{tier_value}'")
                 
-                # Find the first failing tier for this asset
-                first_fail_tier = None
-                for tier_col, tier_value in tier_columns:
-                    if tier_value and str(tier_value).strip().upper() not in ['NFT', 'NFF', 'PASS', 'N/A', 'NA', '']:
-                        # This tier has a failure
-                        first_fail_tier = tier_col
-                        break
+                logger.info(f"  Total tier columns found: {len(tier_columns)}")
                 
-                # If no failure found in tiers, check if all passed
-                if not first_fail_tier:
-                    all_pass = all(str(v).strip().upper() in ['NFT', 'NFF', 'PASS', 'N/A', 'NA', ''] 
-                                 for _, v in tier_columns if v)
-                    if all_pass and tier_columns:
-                        group_key = "✅ All Tiers Passed"
+                # Define pass/not-run values with smarter matching
+                def is_pass_value(val):
+                    """Check if a value indicates a passing test - ONLY explicit PASS/NFF/NFT without '?'"""
+                    if not val:
+                        return False
+                    val_str = str(val).strip().upper()
+                    
+                    # If value ends with "?", it's NOT a definitive pass (uncertain = failure)
+                    if val_str.endswith('?'):
+                        return False
+                    
+                    # Pass ONLY if it's exactly NFF/NFT (with optional hrs in parens) or PASS/PASSED
+                    # Must start with these exact prefixes
+                    if val_str.startswith('NFF') or val_str.startswith('NFT'):
+                        # Additional check: shouldn't contain failure keywords
+                        val_lower = val_str.lower()
+                        if any(fail_word in val_lower for fail_word in ['fail', 'hang', 'error', 'crash']):
+                            return False
+                        return True
+                    return val_str in ['PASS', 'PASSED']
+                
+                def is_not_run(val):
+                    """Check if a value indicates test was not run - ONLY explicit NOT RUN/N/A"""
+                    if not val or str(val).strip() == '':
+                        return True
+                    val_str = str(val).strip().upper()
+                    
+                    # Values with "?" are NOT "not run" - they are uncertain failures
+                    # Only explicit NOT RUN, N/A, NA count as not run
+                    return val_str in ['N/A', 'NA'] or 'NOT RUN' in val_str or 'NOTRUN' in val_str
+                
+                def is_failure(val):
+                    """Check if a value indicates a test failure - anything except explicit PASS or NOT RUN"""
+                    if is_not_run(val):
+                        return False
+                    if is_pass_value(val):
+                        return False
+                    # If it has content and it's not pass/not-run, it's a failure
+                    # This includes "Fail?", "NFF?", and any other uncertain or error values
+                    val_str = str(val).strip()
+                    return len(val_str) > 0
+                
+                # Sort tier columns by their tier level for proper progression analysis
+                # Tier order: tier0/l1/l2 -> tier1/ate ft -> tier2/slt -> tier3/fs1 -> tier4/diag -> tier5/fs2/wl
+                def get_tier_order(col_name):
+                    col_lower = col_name.lower()
+                    # Assign order priority - check for exact matches and substrings
+                    
+                    # Tier 0: Basic tests (L1, L2, ATE, SLT, CESLT, OSV, AFHC at Suzhou)
+                    # These are standalone simple names under Tier0-Suzhou header
+                    if (col_lower in ['l1', 'l2', 'ate', 'slt', 'ceslt', 'osv'] or 
+                        'afhc at suzhou' in col_lower or 'suzhou' in col_lower or
+                        any(x in col_lower for x in ['tier0', 'tier 0'])):
+                        return (0, col_name)
+                    
+                    # Tier 1: ATE detailed tests (ATE FT1, ATE FT2, Per Core Charz)
+                    elif any(x in col_lower for x in ['tier1', 'tier 1', 'ate ft', 'ft1', 'ft2', 'per core', 'core char']):
+                        return (1, col_name)
+                    
+                    # Tier 2: SLT tests (SLT1, SLT2, SLT perCCD)
+                    elif any(x in col_lower for x in ['tier2', 'tier 2', 'slt1', 'slt2', 'slt per', 'perccd']):
+                        return (2, col_name)
+                    
+                    # Tier 3: FS1 tests
+                    elif any(x in col_lower for x in ['tier3', 'tier 3', 'fs1', 'l3 repro', 'afhc det', 'repro']):
+                        return (3, col_name)
+                    
+                    # Tier 4: Diag tests
+                    elif any(x in col_lower for x in ['tier4', 'tier 4', 'diag', 'extended diag', 'shak', 'kvm']):
+                        return (4, col_name)
+                    
+                    # Tier 5: FS2 / WL tests
+                    elif any(x in col_lower for x in ['tier5', 'tier 5', 'fs2', 'wl:', 'wl ', 'variable fan', 'freq exp', 'voltage exp', 'v + freq', 'nominal']):
+                        return (5, col_name)
+                    
                     else:
-                        group_key = "❓ No Tier Data"
-                else:
+                        # Unknown tier
+                        return (99, col_name)
+                
+                # Sort tier columns by logical progression
+                tier_columns_sorted = sorted(tier_columns, key=lambda x: get_tier_order(x[0]))
+                
+                logger.info(f"  Analyzing tier results in progression order:")
+                
+                # Analyze test results across all tiers
+                has_any_failure = False
+                has_any_pass = False
+                has_any_not_run = False
+                all_not_run = True
+                
+                for tier_col, tier_value in tier_columns_sorted:
+                    tier_order = get_tier_order(tier_col)[0]
+                    
+                    is_fail = is_failure(tier_value)
+                    is_pass = is_pass_value(tier_value)
+                    is_not = is_not_run(tier_value)
+                    
+                    logger.info(f"    [Tier{tier_order}] {tier_col}: '{tier_value}' → is_fail={is_fail}, is_pass={is_pass}, is_not_run={is_not}")
+                    
+                    if is_fail:
+                        has_any_failure = True
+                        all_not_run = False
+                    elif is_pass:
+                        has_any_pass = True
+                        all_not_run = False
+                    elif is_not:
+                        has_any_not_run = True
+                
+                logger.info(f"  Summary: has_any_pass={has_any_pass}, has_any_failure={has_any_failure}, has_any_not_run={has_any_not_run}, all_not_run={all_not_run}")
+                
+                # Find the first failing tier in progression order
+                first_fail_tier = None
+                if has_any_failure:
+                    for tier_col, tier_value in tier_columns_sorted:
+                        if is_failure(tier_value):
+                            first_fail_tier = tier_col
+                            logger.info(f"  First failure detected at: {tier_col} (value: '{tier_value}')")
+                            break
+                
+                # Determine grouping
+                logger.info(f"  Determining group assignment:")
+                if not tier_columns:
+                    group_key = "❓ No Tier Data"
+                    logger.info(f"  → Decision: No tier columns found")
+                    logger.info(f"  → Group: {group_key}")
+                elif all_not_run:
+                    group_key = "⏸️ Not Run - No Test Results"
+                    logger.info(f"  → Decision: All tests are 'Not run'")
+                    logger.info(f"  → Group: {group_key}")
+                elif first_fail_tier:
                     # Simplify tier name for grouping
                     tier_name = first_fail_tier.replace(':', '').replace('_', ' ').strip()
                     group_key = f"❌ Failed at: {tier_name}"
+                    logger.info(f"  → Decision: Has failure at first failing tier")
+                    logger.info(f"  → Group: {group_key}")
+                elif has_any_pass and not has_any_failure and not has_any_not_run:
+                    # All Tiers Passed: ALL tiers must be explicitly PASS (no failures, no not-run)
+                    group_key = "✅ All Tiers Passed"
+                    logger.info(f"  → Decision: All tiers have explicit PASS results")
+                    logger.info(f"  → Group: {group_key}")
+                elif has_any_pass and not has_any_failure and has_any_not_run:
+                    # Has some passes and some not-run (no failures) - treat as Not Run
+                    group_key = "⏸️ Not Run - No Test Results"
+                    logger.info(f"  → Decision: Has passes but also has 'Not run' tiers")
+                    logger.info(f"  → Group: {group_key}")
+                else:
+                    group_key = "❓ No Tier Data"
+                    logger.info(f"  → Decision: Edge case - no clear pass/fail pattern")
+                    logger.info(f"  → Group: {group_key} (has_pass={has_any_pass}, has_fail={has_any_failure}, has_not_run={has_any_not_run})")
             
             if group_key:
                 groups[group_key].append(asset)
+        
+        # Final summary logging for tier analysis
+        if group_by == "Tier Analysis":
+            logger.info("=" * 80)
+            logger.info(f"TIER ANALYSIS COMPLETE - {len(groups)} groups created")
+            for group_name, group_assets in sorted(groups.items(), key=lambda x: len(x[1]), reverse=True):
+                logger.info(f"  {group_name}: {len(group_assets)} assets")
+            logger.info("=" * 80)
         
         # Display grouped data
         for group_name, group_assets in sorted(groups.items(), key=lambda x: len(x[1]), reverse=True):
@@ -2211,73 +2493,81 @@ elif st.session_state.page == "Analytics":
                     selected_idx = selected.selection.rows[0]
                     selected_asset = display_assets[selected_idx]
                     
-                    @st.dialog(f"Asset Details: {selected_asset['serial_number']}", width="large")
-                    def show_asset_details():
-                        raw_data = selected_asset.get('raw_data', {})
-                        
-                        st.info("ℹ️ Chinese text is automatically translated (may not be 100% accurate)")
-                        
-                        # Create tabs in dialog
-                        tab1, tab2, tab3, tab4 = st.tabs(["🆔 Identity", "📅 Timeline", "🔧 Technical", "📄 Raw Data"])
-                        
-                        # Tab 1: Identity
-                        with tab1:
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                st.metric("Serial Number", selected_asset['serial_number'])
-                                st.metric("Source File", selected_asset.get('source_filename', 'N/A'))
-                            with col2:
-                                st.metric("Source Sheet", raw_data.get('_source_sheet', 'N/A'))
-                                st.metric("Source Row", raw_data.get('_source_row', 'N/A'))
-                            
-                            st.markdown("---")
-                            st.markdown("**System Information**")
-                            
-                            identity_keywords = ['system', 'cpu', 'sn', 'barcode', 'ppid', 'odm', 'location', '机房', 'vendor']
-                            for key, value in raw_data.items():
-                                if not key.startswith('_') and any(kw in key.lower() for kw in identity_keywords):
-                                    translated_value = translate_text(value) if value else 'N/A'
-                                    st.text(f"{key}: {translated_value}")
-                        
-                        # Tab 2: Timeline
-                        with tab2:
-                            date_keywords = ['date', 'time', 'day', '日期', 'deploy', 'fail', 'rma', 'ship']
-                            date_found = False
-                            
-                            for key, value in raw_data.items():
-                                if not key.startswith('_') and any(kw in key.lower() for kw in date_keywords):
-                                    translated_value = translate_text(value) if value else 'N/A'
-                                    st.metric(key, translated_value)
-                                    date_found = True
-                            
-                            if not date_found:
-                                st.info("No timeline information available")
-                            
-                            st.markdown("---")
-                            st.caption(f"Ingested: {selected_asset.get('ingest_timestamp', 'N/A')}")
-                        
-                        # Tab 3: Technical
-                        with tab3:
-                            tech_keywords = ['error', 'fail', 'status', 'bios', 'firmware', 'log', 'symptom', 'issue', 
-                                           'test', 'code', 'version', '状态', '错误']
-                            tech_found = False
-                            
-                            for key, value in raw_data.items():
-                                if not key.startswith('_') and any(kw in key.lower() for kw in tech_keywords):
-                                    st.markdown(f"**{key}**")
-                                    translated_value = translate_text(value) if value else 'N/A'
-                                    st.text(str(translated_value))
-                                    st.markdown("")
-                                    tech_found = True
-                            
-                            if not tech_found:
-                                st.info("No technical details available")
-                        
-                        # Tab 4: Raw Data
-                        with tab4:
-                            st.json(raw_data)
+                    # Use session state to control dialog opening
+                    dialog_key = f'show_asset_details_{selected_asset["serial_number"]}'
+                    if dialog_key not in st.session_state:
+                        st.session_state[dialog_key] = True
                     
-                    show_asset_details()
+                    if st.session_state.get(dialog_key, False):
+                        @st.dialog(f"Asset Details: {selected_asset['serial_number']}", width="large")
+                        def show_asset_details():
+                            raw_data = selected_asset.get('raw_data', {})
+                            
+                            st.info("ℹ️ Chinese text is automatically translated (may not be 100% accurate)")
+                            
+                            # Create tabs in dialog
+                            tab1, tab2, tab3, tab4 = st.tabs(["🆔 Identity", "📅 Timeline", "🔧 Technical", "📄 Raw Data"])
+                            
+                            # Tab 1: Identity
+                            with tab1:
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    st.metric("Serial Number", selected_asset['serial_number'])
+                                    st.metric("Source File", selected_asset.get('source_filename', 'N/A'))
+                                with col2:
+                                    st.metric("Source Sheet", raw_data.get('_source_sheet', 'N/A'))
+                                    st.metric("Source Row", raw_data.get('_source_row', 'N/A'))
+                                
+                                st.markdown("---")
+                                st.markdown("**System Information**")
+                                
+                                identity_keywords = ['system', 'cpu', 'sn', 'barcode', 'ppid', 'odm', 'location', '机房', 'vendor']
+                                for key, value in raw_data.items():
+                                    if not key.startswith('_') and any(kw in key.lower() for kw in identity_keywords):
+                                        translated_value = translate_text(value) if value else 'N/A'
+                                        st.text(f"{key}: {translated_value}")
+                            
+                            # Tab 2: Timeline
+                            with tab2:
+                                date_keywords = ['date', 'time', 'day', '日期', 'deploy', 'fail', 'rma', 'ship']
+                                date_found = False
+                                
+                                for key, value in raw_data.items():
+                                    if not key.startswith('_') and any(kw in key.lower() for kw in date_keywords):
+                                        translated_value = translate_text(value) if value else 'N/A'
+                                        st.metric(key, translated_value)
+                                        date_found = True
+                                
+                                if not date_found:
+                                    st.info("No timeline information available")
+                                
+                                st.markdown("---")
+                                st.caption(f"Ingested: {selected_asset.get('ingest_timestamp', 'N/A')}")
+                            
+                            # Tab 3: Technical
+                            with tab3:
+                                tech_keywords = ['error', 'fail', 'status', 'bios', 'firmware', 'log', 'symptom', 'issue', 
+                                               'test', 'code', 'version', '状态', '错误']
+                                tech_found = False
+                                
+                                for key, value in raw_data.items():
+                                    if not key.startswith('_') and any(kw in key.lower() for kw in tech_keywords):
+                                        st.markdown(f"**{key}**")
+                                        translated_value = translate_text(value) if value else 'N/A'
+                                        st.text(str(translated_value))
+                                        st.markdown("")
+                                        tech_found = True
+                                
+                                if not tech_found:
+                                    st.info("No technical details available")
+                            
+                            # Tab 4: Raw Data
+                            with tab4:
+                                st.json(raw_data)
+                        
+                        show_asset_details()
+                        # Clear the session state to prevent re-opening
+                        st.session_state[dialog_key] = False
                 
                 # Show analysis dialog for this group (only if explicitly triggered)
                 show_dialog_key = f'show_analytics_analysis_{group_name}'
@@ -2297,6 +2587,15 @@ elif st.session_state.page == "Analytics":
                                 for key in raw_data.keys():
                                     if not key.startswith('_'):
                                         key_lower = key.lower().strip()
+                                        # Skip date/time columns that might contain 'ate' (like 'Date', 'datecode', 'Mfg Date')
+                                        # But include columns with tier indicators even if they have date-like substrings
+                                        is_date_col = any(x in key_lower for x in ['date', 'timestamp', 'time'])
+                                        has_tier_indicator = any(x in key_lower for x in ['tier', 'test', ' l1', ' l2', ' slt', ' ate ', 'ft1', 'ft2', 'wl:'])
+                                        
+                                        if is_date_col and not has_tier_indicator:
+                                            continue  # Skip pure date/time columns
+                                        
+                                        # Check if this is a tier column using flexible matching
                                         if any(kw in key_lower for kw in tier_keywords):
                                             all_tier_cols.add(key)
                             
@@ -2762,6 +3061,8 @@ elif st.session_state.page == "Analytics":
                                     st.info("No time-series data available for tier analysis")
                         
                         show_tier_analysis()
+                        # Clear the session state to prevent re-opening
+                        st.session_state[show_dialog_key] = False
                     
                     else:
                         # General analysis for other groupings
@@ -2885,96 +3186,96 @@ elif st.session_state.page == "Analytics":
                                     plt.close()
                                 else:
                                     st.info("No date data available")
-                        
-                        # Tab 3: Status Distribution
-                        with tab3:
-                            st.markdown("### Status Distribution")
-                            status_counts = Counter()
                             
-                            for asset in group_assets:
-                                key_cols = get_key_columns(asset)
-                                status = key_cols.get('Status', 'Unknown')
-                                if status and status != 'N/A':
-                                    status_counts[status] += 1
+                            # Tab 3: Status Distribution
+                            with tab3:
+                                st.markdown("### Status Distribution")
+                                status_counts = Counter()
+                                
+                                for asset in group_assets:
+                                    key_cols = get_key_columns(asset)
+                                    status = key_cols.get('Status', 'Unknown')
+                                    if status and status != 'N/A':
+                                        status_counts[status] += 1
+                                
+                                if status_counts:
+                                    sorted_status = sorted(status_counts.items(), key=lambda x: x[1], reverse=True)
+                                    statuses = [x[0] for x in sorted_status]
+                                    counts = [x[1] for x in sorted_status]
+                                    
+                                    fig, ax = plt.subplots(figsize=(10, 6), facecolor='#1a1a2e')
+                                    ax.set_facecolor('#16213e')
+                                    
+                                    colors = ['#ffd43b', '#ffc107', '#ffb300', '#ffa000', '#ff8f00',
+                                             '#ff6f00', '#fb8c00', '#f57c00', '#ef6c00', '#e65100']
+                                    
+                                    bars = ax.bar(range(len(statuses)), counts, color=colors[:len(statuses)], 
+                                                 edgecolor='white', linewidth=0.5, width=0.7)
+                                    
+                                    ax.set_xticks(range(len(statuses)))
+                                    ax.set_xticklabels(statuses, rotation=45, ha='right', 
+                                                      fontsize=10, fontweight='bold', color='#ffffff')
+                                    ax.set_ylabel('Count', color='#ffffff', fontsize=12, fontweight='bold')
+                                    ax.set_title('Assets by Status', color='#ffffff', fontsize=14, fontweight='bold', pad=15)
+                                    ax.grid(axis='y', alpha=0.2, color='white', linestyle='--')
+                                    ax.tick_params(colors='#ffffff', labelsize=10)
+                                    
+                                    for spine in ax.spines.values():
+                                        spine.set_color('#3a4a5c')
+                                    
+                                    for i, bar in enumerate(bars):
+                                        height = bar.get_height()
+                                        ax.text(bar.get_x() + bar.get_width()/2, height,
+                                               f'{int(height)}', ha='center', va='bottom', 
+                                               fontsize=10, color='#ffffff', fontweight='bold')
+                                    
+                                    plt.tight_layout()
+                                    st.pyplot(fig)
+                                    plt.close()
+                                else:
+                                    st.info("No status data available")
                             
-                            if status_counts:
-                                sorted_status = sorted(status_counts.items(), key=lambda x: x[1], reverse=True)
-                                statuses = [x[0] for x in sorted_status]
-                                counts = [x[1] for x in sorted_status]
+                            # Tab 4: Error Type Breakdown
+                            with tab4:
+                                st.markdown("### Error Type Breakdown")
+                                error_counts = Counter()
                                 
-                                fig, ax = plt.subplots(figsize=(10, 6), facecolor='#1a1a2e')
-                                ax.set_facecolor('#16213e')
+                                for asset in group_assets:
+                                    key_cols = get_key_columns(asset)
+                                    error_type = key_cols.get('Error', 'Unknown')
+                                    if error_type and error_type != 'N/A':
+                                        error_counts[error_type] += 1
                                 
-                                colors = ['#ffd43b', '#ffc107', '#ffb300', '#ffa000', '#ff8f00',
-                                         '#ff6f00', '#fb8c00', '#f57c00', '#ef6c00', '#e65100']
-                                
-                                bars = ax.bar(range(len(statuses)), counts, color=colors[:len(statuses)], 
-                                             edgecolor='white', linewidth=0.5, width=0.7)
-                                
-                                ax.set_xticks(range(len(statuses)))
-                                ax.set_xticklabels(statuses, rotation=45, ha='right', 
-                                                  fontsize=10, fontweight='bold', color='#ffffff')
-                                ax.set_ylabel('Count', color='#ffffff', fontsize=12, fontweight='bold')
-                                ax.set_title('Assets by Status', color='#ffffff', fontsize=14, fontweight='bold', pad=15)
-                                ax.grid(axis='y', alpha=0.2, color='white', linestyle='--')
-                                ax.tick_params(colors='#ffffff', labelsize=10)
-                                
-                                for spine in ax.spines.values():
-                                    spine.set_color('#3a4a5c')
-                                
-                                for i, bar in enumerate(bars):
-                                    height = bar.get_height()
-                                    ax.text(bar.get_x() + bar.get_width()/2, height,
-                                           f'{int(height)}', ha='center', va='bottom', 
-                                           fontsize=10, color='#ffffff', fontweight='bold')
-                                
-                                plt.tight_layout()
-                                st.pyplot(fig)
-                                plt.close()
-                            else:
-                                st.info("No status data available")
-                        
-                        # Tab 4: Error Type Breakdown
-                        with tab4:
-                            st.markdown("### Error Type Breakdown")
-                            error_counts = Counter()
-                            
-                            for asset in group_assets:
-                                key_cols = get_key_columns(asset)
-                                error_type = key_cols.get('Error', 'Unknown')
-                                if error_type and error_type != 'N/A':
-                                    error_counts[error_type] += 1
-                            
-                            if error_counts:
-                                top_errors = dict(error_counts.most_common(10))
-                                
-                                fig, ax = plt.subplots(figsize=(10, 6), facecolor='#1a1a2e')
-                                ax.set_facecolor('#16213e')
-                                
-                                colors = ['#ff6b6b', '#ee5a6f', '#f06595', '#cc5de8', '#845ef7', 
-                                         '#5c7cfa', '#339af0', '#22b8cf', '#20c997', '#51cf66']
-                                
-                                bars = ax.barh(list(top_errors.keys()), list(top_errors.values()), 
-                                              color=colors[:len(top_errors)], edgecolor='white', linewidth=0.5)
-                                ax.set_xlabel('Count', color='#ffffff', fontsize=12, fontweight='bold')
-                                ax.set_title('Top 10 Error Types', color='#ffffff', fontsize=14, fontweight='bold', pad=15)
-                                ax.grid(axis='x', alpha=0.2, color='white', linestyle='--')
-                                ax.tick_params(colors='#ffffff', labelsize=10)
-                                
-                                for spine in ax.spines.values():
-                                    spine.set_color('#3a4a5c')
-                                
-                                for bar in bars:
-                                    width = bar.get_width()
-                                    ax.text(width + 0.5, bar.get_y() + bar.get_height()/2, 
-                                           f'{int(width)}', ha='left', va='center', 
-                                           fontsize=11, color='#ffffff', fontweight='bold')
-                                
-                                plt.tight_layout()
-                                st.pyplot(fig)
-                                plt.close()
-                            else:
-                                st.info("No error data available")
+                                if error_counts:
+                                    top_errors = dict(error_counts.most_common(10))
+                                    
+                                    fig, ax = plt.subplots(figsize=(10, 6), facecolor='#1a1a2e')
+                                    ax.set_facecolor('#16213e')
+                                    
+                                    colors = ['#ff6b6b', '#ee5a6f', '#f06595', '#cc5de8', '#845ef7', 
+                                             '#5c7cfa', '#339af0', '#22b8cf', '#20c997', '#51cf66']
+                                    
+                                    bars = ax.barh(list(top_errors.keys()), list(top_errors.values()), 
+                                                  color=colors[:len(top_errors)], edgecolor='white', linewidth=0.5)
+                                    ax.set_xlabel('Count', color='#ffffff', fontsize=12, fontweight='bold')
+                                    ax.set_title('Top 10 Error Types', color='#ffffff', fontsize=14, fontweight='bold', pad=15)
+                                    ax.grid(axis='x', alpha=0.2, color='white', linestyle='--')
+                                    ax.tick_params(colors='#ffffff', labelsize=10)
+                                    
+                                    for spine in ax.spines.values():
+                                        spine.set_color('#3a4a5c')
+                                    
+                                    for bar in bars:
+                                        width = bar.get_width()
+                                        ax.text(width + 0.5, bar.get_y() + bar.get_height()/2, 
+                                               f'{int(width)}', ha='left', va='center', 
+                                               fontsize=11, color='#ffffff', fontweight='bold')
+                                    
+                                    plt.tight_layout()
+                                    st.pyplot(fig)
+                                    plt.close()
+                                else:
+                                    st.info("No error data available")
                             
                             # Close button
                             if st.button("✖ Close", type="secondary", use_container_width=True):
@@ -2982,6 +3283,8 @@ elif st.session_state.page == "Analytics":
                                 st.rerun()
                         
                         show_group_analysis()
+                        # Clear the session state to prevent re-opening
+                        st.session_state[show_dialog_key] = False
                 
                 if len(group_assets) > 50:
                     st.caption(f"Note: Limited to 50 assets per group for performance")
