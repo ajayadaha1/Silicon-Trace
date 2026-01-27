@@ -21,13 +21,14 @@ from pydantic import BaseModel
 from models import Asset
 from database import get_session, init_db
 from parser import parse_excel, normalize_column_name
+from pptx_parser import parse_pptx
 
 
 # Initialize FastAPI app
 app = FastAPI(
     title="Silicon Trace API",
     description="Hardware Failure Analysis Tool - Backend API",
-    version="1.0.0"
+    version="3.0.0"
 )
 
 # Configure CORS for frontend access
@@ -85,68 +86,92 @@ async def root():
     return {
         "service": "Silicon Trace API",
         "status": "operational",
-        "version": "1.0.0"
+        "version": "3.0.0"
     }
 
 
 @app.post("/upload", response_model=UploadResponse)
-async def upload_excel(
+async def upload_file(
     file: UploadFile = File(...),
     session: AsyncSession = Depends(get_session)
 ):
     """
-    Upload and parse an Excel file containing asset data.
+    Upload and parse an Excel or PowerPoint file containing asset data.
     
     The endpoint:
-    1. Accepts .xlsx files
-    2. Intelligently detects serial number column
+    1. Accepts .xlsx, .xls, .pptx files
+    2. Intelligently detects serial number column/data
     3. Parses and normalizes data
     4. Performs upsert based on serial number (updates if exists, creates if new)
     
+    Supported formats:
+    - Excel (.xlsx, .xls): Tables with serial numbers
+    - PowerPoint (.pptx): Native tables, text content, or image-based tables (OCR)
+    
     Args:
-        file: Excel file upload
+        file: Excel or PowerPoint file upload
         session: Database session
         
     Returns:
         UploadResponse with processing statistics
     """
     # Validate file type
-    if not file.filename.endswith(('.xlsx', '.xls')):
+    if not file.filename.endswith(('.xlsx', '.xls', '.pptx')):
         raise HTTPException(
             status_code=400,
-            detail="Only Excel files (.xlsx, .xls) are supported"
+            detail="Only Excel files (.xlsx, .xls) and PowerPoint files (.pptx) are supported"
         )
     
     # Save uploaded file temporarily
     try:
         # Check if this exact filename was already uploaded
+        # Check both source_filename field and _files_combined in raw_data
         stmt = select(Asset).where(Asset.source_filename == file.filename).limit(1)
         result = await session.execute(stmt)
-        existing_file = result.scalar_one_or_none()
+        existing_by_source = result.scalar_one_or_none()
         
-        if existing_file:
-            # Check if it's in _files_combined (meaning it was part of a merge)
-            files_combined = existing_file.raw_data.get('_files_combined', existing_file.source_filename)
-            if file.filename in files_combined:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"File '{file.filename}' has already been uploaded. Please delete existing data first if you want to re-upload."
-                )
+        if existing_by_source:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File '{file.filename}' has already been uploaded. Please delete existing data first if you want to re-upload."
+            )
         
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp_file:
+        # Also check if filename appears in any _files_combined field using JSONB query
+        # Use PostgreSQL's JSONB text search operator
+        from sqlalchemy import text as sql_text
+        stmt = sql_text(
+            "SELECT COUNT(*) FROM assets WHERE raw_data->>'_files_combined' LIKE :filename"
+        )
+        result = await session.execute(stmt, {"filename": f"%{file.filename}%"})
+        count = result.scalar()
+        
+        if count and count > 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File '{file.filename}' has already been uploaded as part of merged data. Please delete existing data first if you want to re-upload."
+            )
+        
+        # Determine file extension and create appropriate temp file
+        file_ext = Path(file.filename).suffix.lower()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
             content = await file.read()
             tmp_file.write(content)
             tmp_file_path = tmp_file.name
         
-        # Parse the Excel file
+        # Parse the file based on type
         try:
-            parsed_records = parse_excel(tmp_file_path, original_filename=file.filename)
+            if file_ext in ['.xlsx', '.xls']:
+                parsed_records = parse_excel(tmp_file_path, original_filename=file.filename)
+            elif file_ext == '.pptx':
+                parsed_records = parse_pptx(tmp_file_path, original_filename=file.filename)
+            else:
+                raise ValueError(f"Unsupported file type: {file_ext}")
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
             raise HTTPException(
                 status_code=500,
-                detail=f"Error parsing Excel file: {str(e)}"
+                detail=f"Error parsing file: {str(e)}"
             )
         finally:
             # Clean up temp file
@@ -162,12 +187,29 @@ async def upload_excel(
                 rows_updated=0
             )
         
+        # Deduplicate records by serial number (keep first occurrence)
+        # This handles cases where PPTX has same serial number on multiple slides
+        seen_serials = {}
+        deduped_records = []
+        duplicates_removed = 0
+        
+        for record in parsed_records:
+            serial = record['serial_number']
+            if serial not in seen_serials:
+                seen_serials[serial] = True
+                deduped_records.append(record)
+            else:
+                duplicates_removed += 1
+        
+        if duplicates_removed > 0:
+            print(f"ℹ Removed {duplicates_removed} duplicate serial numbers within the file")
+        
         # Process records - upsert based on serial number
         rows_created = 0
         rows_updated = 0
         rows_merged_from_multiple_files = 0
         
-        for record in parsed_records:
+        for record in deduped_records:
             # Check if asset already exists
             stmt = select(Asset).where(Asset.serial_number == record['serial_number'])
             result = await session.execute(stmt)
@@ -375,7 +417,7 @@ async def search_assets(
 @app.get("/assets", response_model=SearchResponse)
 async def list_assets(
     skip: int = Query(0, ge=0, description="Number of records to skip"),
-    limit: int = Query(50, ge=1, le=1000, description="Maximum results to return"),
+    limit: int = Query(1000, ge=1, le=50000, description="Maximum results to return"),
     source_files: Optional[str] = Query(None, description="Comma-separated list of source filenames to filter"),
     session: AsyncSession = Depends(get_session)
 ):

@@ -49,29 +49,45 @@ class SerialNumberDetector:
     def score_column_header(cls, column_name: str) -> float:
         """
         Score a column header based on similarity to serial number keywords.
+        Higher priority keywords (earlier in list) get higher scores.
         
         Args:
             column_name: The column header to score
             
         Returns:
-            Float score (0.0 to 1.0), higher is better
+            Float score (0.0 to 1.0+), higher is better
         """
         if not isinstance(column_name, str):
             return 0.0
             
         col_lower = column_name.lower().strip()
         
-        # Exact match gets highest score
-        if col_lower in cls.HEADER_KEYWORDS:
-            return 1.0
+        # Check for exact matches - prioritize by position in list
+        # CPU_SN gets highest score (1.5), others decrease gradually
+        for idx, keyword in enumerate(cls.HEADER_KEYWORDS):
+            if col_lower == keyword:
+                # First 3 keywords (cpu_sn variants) get bonus score > 1.0
+                if idx < 3:
+                    return 1.5
+                # Next 3 keywords (2d_barcode) get 1.3
+                elif idx < 6:
+                    return 1.3
+                # Everything else gets 1.0
+                else:
+                    return 1.0
         
         # Partial match - check if any keyword is contained in the column name
         max_score = 0.0
-        for keyword in cls.HEADER_KEYWORDS:
+        for idx, keyword in enumerate(cls.HEADER_KEYWORDS):
             if keyword in col_lower:
                 # Score based on how much of the column name is the keyword
                 # Longer matches relative to column name get higher scores
                 score = len(keyword) / len(col_lower)
+                # Apply priority bonus for top keywords
+                if idx < 3:
+                    score *= 1.2
+                elif idx < 6:
+                    score *= 1.1
                 max_score = max(max_score, score * 0.8)  # Cap at 0.8 for partial matches
         
         return max_score
@@ -105,6 +121,11 @@ class SerialNumberDetector:
             # Convert to string and strip whitespace
             str_value = str(value).strip()
             
+            # Handle multi-line values by taking only the first line
+            # This handles cases like "9AMH711Q50057_100-000001359\nDue 9/18"
+            if '\n' in str_value:
+                str_value = str_value.split('\n')[0].strip()
+            
             # Check for CPU SN format (highest priority)
             if cls.CPU_SN_PATTERN.match(str_value):
                 cpu_sn_matches += 1
@@ -134,9 +155,9 @@ class SerialNumberDetector:
         Detect the most likely serial number column in a DataFrame.
         
         Algorithm:
-        1. Score each column based on header name (weight: 40%)
-        2. Score each column based on data patterns (weight: 60%)
-        3. Select the column with the highest combined score
+        1. Check for high-priority columns (CPU_SN, 2d_barcode_sn) first
+        2. If found with good data patterns, use them immediately
+        3. Otherwise, score all columns and pick the best
         
         Args:
             df: Pandas DataFrame to analyze
@@ -147,6 +168,19 @@ class SerialNumberDetector:
         if df.empty:
             return None
         
+        # Priority keywords that should be preferred (case-insensitive)
+        priority_keywords = ['cpu_sn', 'cpu sn', 'cpusn', '2d_barcode_sn', '2d_barcode', '2d barcode']
+        
+        # First pass: Check for priority columns
+        for column in df.columns:
+            col_lower = column.lower().strip()
+            if col_lower in priority_keywords:
+                # Check if this column has reasonable data patterns
+                data_score = cls.score_column_data(df[column])
+                if data_score >= 0.3:  # Reasonable threshold
+                    return column
+        
+        # Second pass: Score all columns if no priority match found
         scores: Dict[str, Dict[str, float]] = {}
         
         for column in df.columns:
@@ -235,6 +269,51 @@ def normalize_column_name(column_name: str) -> str:
     return normalized
 
 
+def extract_customer_from_filename(filename: str) -> Optional[str]:
+    """
+    Extract customer name from filename.
+    Examples:
+    - "Tencent DPPM Summary Tracker_CQE update_ww52.xlsx" -> "Tencent"
+    - "Alibaba_FA_Status.xlsx" -> "Alibaba"
+    - "Turin-Dense_AlibabaTencent_FA_Status0123.pptx" -> "Alibaba Tencent"
+    
+    Args:
+        filename: Original filename
+        
+    Returns:
+        Customer name or None if not found
+    """
+    if not filename:
+        return None
+    
+    # Common customer names (add more as needed)
+    known_customers = ['Tencent', 'Alibaba', 'Meta', 'Google', 'Microsoft', 'Amazon', 
+                      'Facebook', 'ByteDance', 'Baidu', 'Huawei', 'Intel', 'AMD']
+    
+    # Check for known customer names in filename
+    filename_upper = filename.upper()
+    found_customers = []
+    
+    for customer in known_customers:
+        if customer.upper() in filename_upper:
+            found_customers.append(customer)
+    
+    if found_customers:
+        return ' '.join(found_customers)
+    
+    # Fallback: Extract first word before common separators
+    # e.g., "CustomerName_Report.xlsx" -> "CustomerName"
+    import re
+    match = re.match(r'^([A-Za-z]+)[\s_\-]', filename)
+    if match:
+        first_word = match.group(1)
+        # Avoid common generic words
+        if first_word.lower() not in ['summary', 'tracker', 'report', 'status', 'data', 'fa', 'dppm']:
+            return first_word
+    
+    return None
+
+
 def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str, Any]]:
     """
     Parse an Excel file and extract asset data with intelligent serial number detection.
@@ -270,6 +349,11 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
     # Use original filename if provided, otherwise use the file path name
     source_filename = original_filename if original_filename else file_path_obj.name
     
+    # Extract customer name from filename
+    customer_from_filename = extract_customer_from_filename(source_filename)
+    if customer_from_filename:
+        print(f"Extracted customer from filename: '{customer_from_filename}' from '{source_filename}'")
+    
     # Read ALL sheets from the Excel file
     try:
         excel_file = pd.ExcelFile(file_path)
@@ -281,8 +365,9 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
         return []
     
     # Skip sheets that are likely lookup/reference data
-    # These sheets typically have generic names and contain thousands of rows
-    SKIP_SHEET_PATTERNS = ['datecode', 'sheet1', 'lookup', 'reference', 'master', 'database']
+    # Only skip if there's more than one sheet and this sheet has a generic name
+    # Don't skip if it's the only sheet (likely contains the actual data)
+    SKIP_SHEET_PATTERNS = ['datecode', 'lookup', 'reference', 'master', 'database', 'template']
     MAX_SHEET_ROWS = 2000  # Skip sheets with more than this many rows (likely reference data)
     
     # Dictionary to store combined data by serial number
@@ -292,13 +377,51 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
     for sheet_name in sheet_names:
         try:
             # Check if sheet should be skipped based on name
+            # Only skip generic names if there are multiple sheets
             sheet_lower = sheet_name.lower().strip()
-            if any(pattern in sheet_lower for pattern in SKIP_SHEET_PATTERNS):
-                print(f"Skipping sheet '{sheet_name}': matches skip pattern")
+            should_skip = False
+            
+            if len(sheet_names) > 1:
+                # If multiple sheets, skip generic names
+                if any(pattern in sheet_lower for pattern in SKIP_SHEET_PATTERNS):
+                    print(f"Skipping sheet '{sheet_name}': matches skip pattern (multiple sheets present)")
+                    should_skip = True
+            
+            if should_skip:
                 continue
             
             # Read with no duplicate column handling - we'll merge them ourselves
-            df = pd.read_excel(file_path, sheet_name=sheet_name)
+            # First, try to detect multi-row headers
+            df_test = pd.read_excel(file_path, sheet_name=sheet_name, nrows=5)
+            
+            # Check if first few rows contain header-like data
+            # Multi-row headers often have merged cells or repeated patterns
+            header_row = 0
+            for row_idx in range(min(4, len(df_test))):
+                row_data = df_test.iloc[row_idx]
+                # Count how many values look like headers (contain common keywords)
+                header_like_count = 0
+                for val in row_data:
+                    if pd.notna(val):
+                        val_str = str(val).lower()
+                        # Check for header keywords
+                        if any(kw in val_str for kw in ['serial', 'sn', 'number', 'customer', 'date', 
+                                                         'status', 'error', 'failure', 'ticket', 'priority',
+                                                         'bios', 'wafer', 'faili', 'ccd', 'ttf', 'ate', 'slt',
+                                                         'platform', 'mfg']):
+                            header_like_count += 1
+                
+                # If more than 30% of cells look like headers, this might be the real header row
+                if header_like_count >= len(df_test.columns) * 0.3:
+                    header_row = row_idx
+                    break
+            
+            # Re-read with correct header row
+            if header_row > 0:
+                print(f"Sheet '{sheet_name}': Detected multi-row header at row {header_row}")
+                df = pd.read_excel(file_path, sheet_name=sheet_name, header=header_row)
+            else:
+                df = pd.read_excel(file_path, sheet_name=sheet_name)
             
             # Log columns for debugging duplicate detection
             print(f"Sheet '{sheet_name}' columns: {list(df.columns)}")
@@ -341,21 +464,37 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
                 serial_number = str(row[serial_column]).strip()
                 
                 # Skip rows with invalid serial numbers
-                if not serial_number or serial_number.lower() in ['nan', 'none', '', 'null']:
+                if not serial_number or serial_number.lower() in ['nan', 'none', '', 'null', 'nat', 'n/a', 'na', 'tbd', 'tbc']:
+                    continue
+                
+                # Skip header rows that appear as data (common in messy Excel files)
+                # Check if the value looks like a column header
+                sn_lower = serial_number.lower().replace(' ', '').replace('_', '')
+                header_patterns = ['cpusn', 'cpu0sn', 'cpu1sn', 'serialnumber', 'serial', 
+                                  'barcode', 'ppid', 'systemsn', 'rma', 'assetid']
+                if any(pattern in sn_lower for pattern in header_patterns) and len(serial_number) < 20:
                     continue
                 
                 # Initialize record for this serial number if it doesn't exist
                 if serial_number not in combined_data:
+                    raw_data_init = {
+                        '_source_sheet': sheet_name,
+                        '_source_row': int(idx) + 2,  # +2 because Excel is 1-indexed and has header
+                        '_serial_column': serial_column
+                    }
+                    
+                    # Add customer from filename as fallback (only if no customer column exists)
+                    # This will be used if the data doesn't have a customer column
+                    # If a customer column exists, it will overwrite this in later processing
+                    if customer_from_filename:
+                        raw_data_init['_customer_from_filename'] = customer_from_filename
+                    
                     combined_data[serial_number] = {
                         'serial_number': serial_number,
                         'error_type': None,
                         'status': None,
                         'source_filename': source_filename,
-                        'raw_data': {
-                            '_source_sheet': sheet_name,
-                            '_source_row': int(idx) + 2,  # +2 because Excel is 1-indexed and has header
-                            '_serial_column': serial_column
-                        },
+                        'raw_data': raw_data_init,
                         'sheets_found': [f"{sheet_name} (row {int(idx) + 2})"]
                     }
                 else:
@@ -416,6 +555,26 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
             "Please ensure the file contains columns with serial numbers "
             "(headers like 'SN', 'Serial', 'PPID', '2d_barcode_sn', 'System SN', 'RMA#', etc.)"
         )
+    
+    # Post-process: Apply customer from filename if no Customer column found in data
+    for serial_number, record in combined_data.items():
+        raw_data = record['raw_data']
+        
+        # If we have a filename customer but no actual Customer column in the data, use it
+        if '_customer_from_filename' in raw_data:
+            # Check if any actual customer column exists
+            has_customer_column = any(
+                'customer' in normalize_column_name(k).lower() 
+                for k in raw_data.keys() 
+                if not k.startswith('_')
+            )
+            
+            if not has_customer_column:
+                # No customer column found, use filename customer
+                raw_data['Customer'] = raw_data['_customer_from_filename']
+            
+            # Remove the temporary field
+            del raw_data['_customer_from_filename']
     
     # Log summary
     print(f"Parser summary: Found {len(combined_data)} unique serial numbers from {len(sheet_names)} sheet(s)")
