@@ -699,6 +699,7 @@ with st.sidebar:
         {"icon": "📤", "label": "File Manager", "page": "Ingest"},
         {"icon": "🔍", "label": "Trace Assets", "page": "Trace"},
         {"icon": "📊", "label": "Analytics", "page": "Analytics"},
+        {"icon": "🤖", "label": "AI Co-Analyst", "page": "AI"},
     ]
     
     # Create navigation buttons
@@ -3282,6 +3283,538 @@ elif st.session_state.page == "Analytics":
                     st.caption(f"Note: Limited to 50 assets per group for performance")
     else:
         st.info("🎯 No assets available for analytics. Upload data from the **Ingest Data** page to get started!")
+
+elif st.session_state.page == "AI":
+    # ==================== AI CO-ANALYST PAGE ====================
+    st.markdown("## 🤖 AI Co-Analyst")
+    st.caption("Powered by AMD Nabu AI Platform • Chat with your data • Auto-insights • Dynamic visualizations")
+    
+    # Add AI-specific CSS
+    st.markdown("""
+    <style>
+        .ai-message {
+            padding: 15px;
+            border-radius: 10px;
+            margin: 10px 0;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        .user-message {
+            padding: 15px;
+            border-radius: 10px;
+            margin: 10px 0;
+            background: #f0f2f6;
+            color: #262730;
+        }
+        .insight-card {
+            padding: 20px;
+            border-radius: 10px;
+            border-left: 4px solid #667eea;
+            background: white;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin: 10px 0;
+            color: #262730;
+        }
+        .insight-card h4 {
+            color: #262730;
+            margin: 0 0 10px 0;
+        }
+        .insight-card p {
+            color: #4a4a4a;
+            margin: 5px 0;
+        }
+        .insight-card small {
+            color: #666;
+        }
+        .metric-card {
+            padding: 20px;
+            border-radius: 10px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            text-align: center;
+        }
+        .code-block {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 15px;
+            border-radius: 8px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            overflow-x: auto;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    # Initialize AI session state
+    if 'chat_messages' not in st.session_state:
+        st.session_state.chat_messages = []
+    if 'chat_id' not in st.session_state:
+        st.session_state.chat_id = None
+    if 'analysis_cache' not in st.session_state:
+        st.session_state.analysis_cache = {}
+    
+    # Get all assets from database for AI analysis
+    assets_data = get_assets_filtered(source_files=None)
+    
+    if not assets_data or not assets_data.get("assets"):
+        st.warning("⚠️ No data available. Please upload files from **File Manager** first.")
+    else:
+        # Main content - Tabs
+        import plotly.graph_objects as go
+        
+        tab1, tab2, tab3, tab4 = st.tabs([
+            "💬 Chat",
+            "🔍 Auto-Insights", 
+            "📊 Visualization Studio",
+            "🔬 Root Cause Analysis"
+        ])
+        
+        # Get list of source files for AI
+        source_files = list(set([asset.get('source_filename', 'unknown') for asset in assets_data.get("assets", [])]))
+        # Tab 1: Conversational Chat
+        with tab1:
+            st.subheader("💬 Conversational Analytics")
+            st.caption("Ask anything about your failure data - the AI will provide data-driven answers")
+            
+            # Display chat history
+            chat_container = st.container()
+            
+            with chat_container:
+                for msg in st.session_state.chat_messages:
+                    if msg["role"] == "user":
+                        st.markdown(f"""
+                        <div class="user-message">
+                            <strong>You:</strong><br>
+                            {msg["content"]}
+                        </div>
+                        """, unsafe_allow_html=True)
+                    else:
+                        st.markdown(f"""
+                        <div class="ai-message">
+                            <strong>🤖 AI Co-Analyst:</strong><br>
+                            {msg["content"]}
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        # Show chart if available
+                        if "chart" in msg and msg["chart"]:
+                            st.plotly_chart(msg["chart"], use_container_width=True)
+                        
+                        # Show code if available
+                        if "code" in msg and msg["code"]:
+                            with st.expander("📝 View Generated Code"):
+                                st.code(msg["code"], language="python")
+            
+            # Chat input
+            st.divider()
+            
+            col1, col2 = st.columns([5, 1])
+            
+            with col1:
+                user_input = st.text_input(
+                    "Ask a question:",
+                    placeholder="e.g., 'Why is ALIBABA failing at L1?' or 'Show top 5 error types' or 'Compare failure rates by customer'",
+                    key="chat_input",
+                    label_visibility="collapsed"
+                )
+            
+            with col2:
+                send_button = st.button("📤 Send", type="primary", use_container_width=True)
+            
+            if send_button and user_input:
+                # Add user message
+                st.session_state.chat_messages.append({
+                    "role": "user",
+                    "content": user_input
+                })
+                
+                # Call AI endpoint
+                with st.spinner("🤖 AI is thinking..."):
+                    try:
+                        # Prepare history for API
+                        history = []
+                        for msg in st.session_state.chat_messages[:-1]:  # Exclude current message
+                            history.append({
+                                "role": msg["role"],
+                                "content": msg["content"]
+                            })
+                        
+                        response = requests.post(
+                            f"{BACKEND_URL}/ai/chat",
+                            json={
+                                "message": user_input,
+                                "file_ids": source_files,
+                                "chat_id": st.session_state.chat_id,
+                                "history": history
+                            },
+                            timeout=120
+                        )
+                        
+                        if response.status_code == 200:
+                            result = response.json()
+                            
+                            # Add AI response
+                            st.session_state.chat_messages.append({
+                                "role": "assistant",
+                                "content": result["response"]
+                            })
+                            
+                            # Update chat ID
+                            if result.get("chat_id"):
+                                st.session_state.chat_id = result["chat_id"]
+                            
+                            st.rerun()
+                        else:
+                            st.error(f"Error: {response.json().get('detail', 'Unknown error')}")
+                            
+                    except Exception as e:
+                        st.error(f"Failed to get AI response: {str(e)}")
+            
+            # Clear chat button
+            if st.session_state.chat_messages:
+                if st.button("🗑️ Clear Chat History"):
+                    st.session_state.chat_messages = []
+                    st.session_state.chat_id = None
+                    st.rerun()
+        
+        # Tab 2: Auto-Insights
+        with tab2:
+            st.subheader("🔍 Automatic Insight Generation")
+            st.caption("AI automatically analyzes your data and extracts key insights, patterns, and recommendations")
+            
+            col1, col2, col3 = st.columns([2, 2, 1])
+            
+            with col1:
+                focus_options = st.multiselect(
+                    "Focus areas (optional):",
+                    options=["failures", "customers", "trends", "errors", "tiers", "performance"],
+                    help="Narrow down the analysis focus"
+                )
+            
+            with col3:
+                analyze_button = st.button("🔍 Analyze", type="primary", use_container_width=True)
+            
+            if analyze_button:
+                with st.spinner("🤖 AI is analyzing your data... This may take a minute..."):
+                    try:
+                        response = requests.post(
+                            f"{BACKEND_URL}/ai/analyze",
+                            json={
+                                "file_ids": source_files,
+                                "focus_areas": focus_options if focus_options else None
+                            },
+                            timeout=180
+                        )
+                        
+                        if response.status_code == 200:
+                            result = response.json()
+                            st.session_state.analysis_cache = result
+                        else:
+                            st.error(f"Error: {response.json().get('detail', 'Unknown error')}")
+                            
+                    except Exception as e:
+                        st.error(f"Analysis failed: {str(e)}")
+            
+            # Display cached analysis results
+            if st.session_state.analysis_cache:
+                result = st.session_state.analysis_cache
+                
+                st.success("✅ Analysis Complete!")
+                
+                # Key Metrics
+                st.subheader("📊 Key Metrics")
+                metrics = result.get("metrics", {})
+                
+                if metrics:
+                    cols = st.columns(len(metrics))
+                    for i, (key, value) in enumerate(metrics.items()):
+                        with cols[i]:
+                            st.markdown(f"""
+                            <div class="metric-card">
+                                <h3>{value}</h3>
+                                <p>{key.replace('_', ' ').title()}</p>
+                            </div>
+                            """, unsafe_allow_html=True)
+                
+                st.divider()
+                
+                # Insights
+                st.subheader("🎯 Key Insights")
+                insights = result.get("insights", [])
+                
+                for insight in insights:
+                    impact_color = {
+                        "high": "🔴",
+                        "medium": "🟡",
+                        "low": "🟢"
+                    }.get(insight.get("impact", "medium"), "🔵")
+                    
+                    st.markdown(f"""
+                    <div class="insight-card">
+                        <h4>{impact_color} {insight.get('title', 'Insight')}</h4>
+                        <p>{insight.get('description', '')}</p>
+                        <small><strong>Impact:</strong> {insight.get('impact', 'medium').upper()}</small>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                st.divider()
+                
+                # Anomalies
+                st.subheader("⚠️ Anomalies Detected")
+                anomalies = result.get("anomalies", [])
+                
+                if anomalies:
+                    for anomaly in anomalies:
+                        severity_icon = {
+                            "high": "🚨",
+                            "medium": "⚠️",
+                            "low": "ℹ️"
+                        }.get(anomaly.get("severity", "medium"), "⚠️")
+                        
+                        st.warning(f"{severity_icon} **{anomaly.get('type', 'Anomaly')}**: {anomaly.get('description', '')}")
+                else:
+                    st.info("No significant anomalies detected")
+                
+                st.divider()
+                
+                # Recommendations
+                st.subheader("💡 Recommendations")
+                recommendations = result.get("recommendations", [])
+                
+                if recommendations:
+                    for i, rec in enumerate(recommendations, 1):
+                        st.success(f"✓ **{i}.** {rec}")
+                else:
+                    st.info("No specific recommendations at this time")
+                
+                # Trend Analysis
+                if result.get("trend_analysis"):
+                    st.divider()
+                    st.subheader("📈 Trend Analysis")
+                    
+                    trend = result["trend_analysis"]
+                    
+                    if trend.get("patterns"):
+                        st.write("**Patterns Detected:**")
+                        for pattern in trend["patterns"]:
+                            st.write(f"• {pattern}")
+                    
+                    if trend.get("predictions"):
+                        st.write("**Predictions:**")
+                        for prediction in trend["predictions"]:
+                            st.write(f"• {prediction}")
+        
+        # Tab 3: Visualization Studio
+        with tab3:
+            st.subheader("📊 Dynamic Visualization Studio")
+            st.caption("Describe any chart you want - AI will generate and render it live")
+            
+            # Examples
+            with st.expander("💡 Example Requests"):
+                st.markdown("""
+                - "Create a sunburst chart showing customer → tier → error hierarchy"
+                - "Show a 3D scatter plot of failures by date, customer, and tier"
+                - "Generate a Sankey diagram of test tier progression"
+                - "Make a heatmap of error types vs customers"
+                - "Show a timeline of failures with trend line"
+                - "Create a radar chart comparing customer failure profiles"
+                """)
+            
+            viz_request = st.text_area(
+                "Describe your visualization:",
+                placeholder="E.g., 'Create a bar chart showing top 10 customers by failure count'",
+                height=100,
+                key="viz_request"
+            )
+            
+            col1, col2, col3 = st.columns([1, 1, 3])
+            
+            with col1:
+                viz_button = st.button("🎨 Generate Visualization", type="primary", use_container_width=True)
+            
+            if viz_button and viz_request:
+                with st.spinner("🤖 AI is generating your visualization..."):
+                    try:
+                        response = requests.post(
+                            f"{BACKEND_URL}/ai/visualize",
+                            json={
+                                "request": viz_request,
+                                "file_ids": source_files
+                            },
+                            timeout=120
+                        )
+                        
+                        if response.status_code == 200:
+                            result = response.json()
+                            
+                            if result["success"]:
+                                st.session_state.current_viz = result
+                                st.success("✅ Visualization generated successfully!")
+                            else:
+                                st.error(f"❌ Error: {result.get('error', 'Unknown error')}")
+                                if result.get("code"):
+                                    with st.expander("View Generated Code (with error)"):
+                                        st.code(result["code"], language="python")
+                        else:
+                            st.error(f"Error: {response.json().get('detail', 'Unknown error')}")
+                            
+                    except Exception as e:
+                        st.error(f"Visualization failed: {str(e)}")
+            
+            # Display generated visualization
+            if "current_viz" in st.session_state:
+                viz = st.session_state.current_viz
+                
+                st.divider()
+                
+                # Show generated code
+                with st.expander("📝 View AI-Generated Code", expanded=False):
+                    st.code(viz["code"], language="python")
+                
+                # Render chart
+                try:
+                    fig = go.Figure(viz["figure"])
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Export options
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        # HTML export
+                        html_str = fig.to_html()
+                        st.download_button(
+                            label="💾 Download as HTML",
+                            data=html_str,
+                            file_name=f"silicon_trace_chart_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html",
+                            mime="text/html"
+                        )
+                    
+                    with col2:
+                        # Code export
+                        st.download_button(
+                            label="📝 Download Code",
+                            data=viz["code"],
+                            file_name="chart_code.py",
+                            mime="text/plain"
+                        )
+                except Exception as e:
+                    st.error(f"Failed to render visualization: {str(e)}")
+        
+        # Tab 4: Root Cause Analysis
+        with tab4:
+            st.subheader("🔬 AI-Powered Root Cause Analysis")
+            st.caption("Multi-step autonomous investigation with AI agent")
+            
+            investigation_topic = st.selectbox(
+                "Investigation Topic:",
+                [
+                    "High failure rate for specific customer",
+                    "Sudden spike in failures",
+                    "Recurring error pattern",
+                    "Tier progression anomalies",
+                    "Performance degradation",
+                    "Custom investigation..."
+                ]
+            )
+            
+            if investigation_topic == "Custom investigation...":
+                custom_topic = st.text_input(
+                    "Describe what you want to investigate:",
+                    placeholder="E.g., 'Why are L1 failures increasing for ALIBABA?'"
+                )
+                final_topic = custom_topic
+            else:
+                final_topic = investigation_topic
+            
+            max_steps = st.slider(
+                "Investigation depth:",
+                min_value=3,
+                max_value=10,
+                value=5,
+                help="Number of investigation steps AI will perform"
+            )
+            
+            investigate_button = st.button("🚀 Start Investigation", type="primary")
+            
+            if investigate_button and final_topic:
+                with st.spinner("🔬 AI Agent is investigating... This may take a few minutes..."):
+                    try:
+                        response = requests.post(
+                            f"{BACKEND_URL}/ai/investigate",
+                            json={
+                                "topic": final_topic,
+                                "file_ids": source_files,
+                                "max_steps": max_steps
+                            },
+                            timeout=300
+                        )
+                        
+                        if response.status_code == 200:
+                            result = response.json()
+                            st.session_state.investigation = result
+                            st.success("✅ Investigation Complete!")
+                        else:
+                            st.error(f"Error: {response.json().get('detail', 'Unknown error')}")
+                            
+                    except Exception as e:
+                        st.error(f"Investigation failed: {str(e)}")
+            
+            # Display investigation results
+            if "investigation" in st.session_state:
+                inv = st.session_state.investigation
+                
+                st.divider()
+                
+                # Hypothesis
+                st.info(f"**Hypothesis:** {inv.get('hypothesis', 'N/A')}")
+                
+                # Investigation Steps
+                st.subheader("🔍 Investigation Process")
+                
+                steps = inv.get("steps", [])
+                for step in steps:
+                    with st.expander(f"**Step {step.get('number', '?')}:** {step.get('title', 'Investigation Step')}", expanded=True):
+                        st.write(f"**Investigation:** {step.get('description', '')}")
+                        st.write(f"**Findings:** {step.get('findings', '')}")
+                        
+                        if step.get("data_needed"):
+                            st.caption(f"Data columns analyzed: {', '.join(step['data_needed'])}")
+                
+                st.divider()
+                
+                # Conclusion
+                st.subheader("🎯 Conclusion")
+                confidence_icon = {
+                    "high": "🟢",
+                    "medium": "🟡",
+                    "low": "🔴"
+                }.get(inv.get("confidence", "medium"), "🔵")
+                
+                st.info(f"{confidence_icon} **Confidence: {inv.get('confidence', 'medium').upper()}**\n\n{inv.get('conclusion', '')}")
+                
+                # Root Causes
+                st.subheader("🔍 Root Causes Identified")
+                root_causes = inv.get("root_causes", [])
+                
+                if root_causes:
+                    for i, cause in enumerate(root_causes, 1):
+                        st.error(f"**{i}.** {cause}")
+                else:
+                    st.info("No specific root causes identified")
+                
+                # Recommendations
+                st.subheader("🛠️ Recommended Actions")
+                recommendations = inv.get("recommendations", [])
+                
+                if recommendations:
+                    for i, rec in enumerate(recommendations, 1):
+                        st.success(f"✓ **{i}.** {rec}")
+                else:
+                    st.info("No specific recommendations at this time")
+        
+        # AI Footer
+        st.divider()
+        st.caption("💡 **Tip:** The AI works best with specific questions. Try asking about trends, comparisons, or patterns in your data.")
+        st.caption("🔒 All analysis is performed using AMD Nabu AI with your internal data - no external AI services used.")
 
 
 # Footer

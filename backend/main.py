@@ -7,7 +7,7 @@ Provides REST API endpoints for:
 - Searching assets
 """
 
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from pathlib import Path
 import tempfile
 import os
@@ -22,6 +22,10 @@ from models import Asset
 from database import get_session, init_db
 from parser import parse_excel, normalize_column_name
 from pptx_parser import parse_pptx
+from nabu_client import get_nabu_client
+from code_sandbox import get_sandbox
+import pandas as pd
+import json
 
 
 # Initialize FastAPI app
@@ -497,6 +501,31 @@ async def get_source_files(session: AsyncSession = Depends(get_session)):
     }
 
 
+@app.get("/files")
+async def get_files(session: AsyncSession = Depends(get_session)):
+    """
+    Get list of all unique source filenames (alias for /source-files for compatibility).
+    
+    Returns:
+        List of source filenames
+    """
+    # Get distinct source filenames with counts
+    from sqlalchemy import func
+    
+    stmt = select(
+        Asset.source_filename,
+        func.count(Asset.id).label('asset_count'),
+        func.max(Asset.ingest_timestamp).label('last_updated')
+    ).group_by(Asset.source_filename).order_by(Asset.source_filename)
+    
+    result = await session.execute(stmt)
+    files = result.all()
+    
+    return {
+        "files": [row[0] for row in files]
+    }
+
+
 @app.delete("/source-files/{filename}")
 async def delete_source_file(
     filename: str,
@@ -534,6 +563,394 @@ async def delete_source_file(
         "deleted_count": count,
         "filename": filename
     }
+
+
+# AI Co-Analyst Endpoints
+# Configuration for Nabu API
+NABU_API_TOKEN = os.getenv("NABU_API_TOKEN", "11b3446d3714401a8bc89eba04c4e343")
+
+
+class ChatRequest(BaseModel):
+    """Request model for AI chat"""
+    message: str
+    file_ids: Optional[List[str]] = []
+    chat_id: Optional[str] = None
+    history: Optional[List[Dict]] = []
+
+
+class AnalyzeRequest(BaseModel):
+    """Request model for AI data analysis"""
+    file_ids: Optional[List[str]] = []
+    focus_areas: Optional[List[str]] = None
+
+
+class VisualizeRequest(BaseModel):
+    """Request model for AI visualization generation"""
+    request: str
+    file_ids: Optional[List[str]] = []
+
+
+class InvestigateRequest(BaseModel):
+    """Request model for AI root cause analysis"""
+    topic: str
+    file_ids: Optional[List[str]] = []
+    max_steps: int = 5
+
+
+@app.post("/ai/chat")
+async def ai_chat(
+    request: ChatRequest,
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    Conversational AI interface for data exploration
+    
+    Allows users to ask questions about their failure data and get
+    intelligent responses with optional visualizations.
+    """
+    try:
+        # Get data context
+        data_context = await _get_data_context(session, request.file_ids)
+        
+        # Enhance prompt with comprehensive data context
+        enhanced_prompt = f"""You are analyzing hardware failure data for Silicon Trace.
+
+COMPLETE DATA SUMMARY (ALL {data_context['total_assets']} RECORDS):
+
+📊 FULL STATISTICS FOR EVERY COLUMN:
+{json.dumps(data_context.get('complete_statistics', {}), indent=2)}
+
+🔢 ALL SERIAL NUMBERS ({len(data_context.get('all_serial_numbers', []))} total):
+{', '.join(data_context.get('all_serial_numbers', [])[:20])}{'...' if len(data_context.get('all_serial_numbers', [])) > 20 else ''}
+
+📈 CUSTOMER-ERROR MATRIX (ALL combinations):
+{json.dumps(data_context.get('customer_error_matrix', {}), indent=2)}
+
+📅 TIMELINE (ALL failures by date):
+{json.dumps(data_context.get('timeline', {}), indent=2)}
+
+📝 REPRESENTATIVE SAMPLES:
+{json.dumps(data_context['sample'][:3], indent=2)}
+
+Available columns: {', '.join(data_context['columns'])}
+
+USER QUESTION: {request.message}
+
+IMPORTANT: You have COMPLETE statistics for all {data_context['total_assets']} records above. 
+Use the full statistics to provide accurate counts, lists, and insights. 
+For example:
+- "List all serial numbers" → Use all_serial_numbers list
+- "Which customer has most failures?" → Use complete_statistics['Customer']
+- "What error types exist?" → Use complete_statistics['error_type']
+- "How many failures per date?" → Use timeline
+
+Provide data-driven responses using the complete statistics."""
+
+        # Call Nabu AI
+        nabu = get_nabu_client(NABU_API_TOKEN)
+        response = await nabu.chat(
+            user_prompt=enhanced_prompt,
+            history=request.history,
+            chat_id=request.chat_id
+        )
+        
+        return {
+            "success": True,
+            "response": response.get('responseText', response.get('response', response.get('message', ''))),
+            "chat_id": request.chat_id,
+            "raw_response": response
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"AI chat error: {str(e)}")
+
+
+@app.post("/ai/analyze")
+async def ai_analyze(
+    request: AnalyzeRequest,
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    Automatically analyze dataset and extract insights
+    
+    Returns structured insights including:
+    - Key metrics summary
+    - Top insights and patterns
+    - Anomalies detected
+    - Actionable recommendations
+    """
+    try:
+        # Get data as DataFrame
+        df = await _get_dataframe(session, request.file_ids)
+        
+        if df.empty:
+            raise HTTPException(status_code=400, detail="No data available for analysis")
+        
+        # Call Nabu AI for analysis
+        nabu = get_nabu_client(NABU_API_TOKEN)
+        result = await nabu.analyze_dataframe(df, request.focus_areas)
+        
+        if not result['success']:
+            raise HTTPException(status_code=500, detail=result.get('error', 'Analysis failed'))
+        
+        analysis = result['analysis']
+        
+        return {
+            "success": True,
+            "metrics": analysis.get('key_metrics', {}),
+            "insights": analysis.get('insights', []),
+            "anomalies": analysis.get('anomalies', []),
+            "recommendations": analysis.get('recommendations', []),
+            "trend_analysis": analysis.get('trend_analysis', {}),
+            "raw_response": result.get('raw_response')
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Analysis error: {str(e)}")
+
+
+@app.post("/ai/visualize")
+async def ai_visualize(
+    request: VisualizeRequest,
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    Generate custom visualization based on natural language request
+    
+    AI generates Plotly code, executes it safely, and returns the figure
+    along with the generated code.
+    """
+    try:
+        # Get data as DataFrame
+        df = await _get_dataframe(session, request.file_ids)
+        
+        if df.empty:
+            raise HTTPException(status_code=400, detail="No data available for visualization")
+        
+        # Generate code with Nabu AI
+        nabu = get_nabu_client(NABU_API_TOKEN)
+        code_result = await nabu.generate_visualization_code(request.request, df)
+        
+        if not code_result['success']:
+            raise HTTPException(status_code=500, detail="Failed to generate visualization code")
+        
+        code = code_result['code']
+        
+        # Execute code in sandbox
+        sandbox = get_sandbox()
+        exec_result = sandbox.execute(code, df)
+        
+        if not exec_result['success']:
+            return {
+                "success": False,
+                "error": exec_result['error'],
+                "code": code,
+                "output": exec_result.get('output', '')
+            }
+        
+        # Convert figure to JSON
+        fig_json = exec_result['figure'].to_json()
+        
+        return {
+            "success": True,
+            "figure": json.loads(fig_json),
+            "code": code,
+            "output": exec_result.get('output', '')
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Visualization error: {str(e)}")
+
+
+@app.post("/ai/investigate")
+async def ai_investigate(
+    request: InvestigateRequest,
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    Perform multi-step root cause analysis investigation
+    
+    AI agent autonomously explores data, generates hypotheses,
+    and provides structured findings with recommendations.
+    """
+    try:
+        # Get data as DataFrame
+        df = await _get_dataframe(session, request.file_ids)
+        
+        if df.empty:
+            raise HTTPException(status_code=400, detail="No data available for investigation")
+        
+        # Call Nabu AI for investigation
+        nabu = get_nabu_client(NABU_API_TOKEN)
+        result = await nabu.investigate(request.topic, df, request.max_steps)
+        
+        if not result['success']:
+            raise HTTPException(status_code=500, detail=result.get('error', 'Investigation failed'))
+        
+        investigation = result['investigation']
+        
+        return {
+            "success": True,
+            "hypothesis": investigation.get('hypothesis', ''),
+            "steps": investigation.get('steps', []),
+            "conclusion": investigation.get('conclusion', ''),
+            "root_causes": investigation.get('root_causes', []),
+            "recommendations": investigation.get('recommendations', []),
+            "confidence": investigation.get('confidence', 'medium'),
+            "raw_response": result.get('raw_response')
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Investigation error: {str(e)}")
+
+
+# Helper functions for AI endpoints
+async def _get_data_context(
+    session: AsyncSession,
+    file_ids: Optional[List[str]] = None
+) -> Dict:
+    """Get comprehensive statistical summary of ALL data (cost-effective alternative to raw records)"""
+    query = select(Asset)
+    if file_ids:
+        query = query.where(Asset.source_filename.in_(file_ids))
+    
+    result = await session.execute(query.limit(1000))
+    assets = result.scalars().all()
+    
+    if not assets:
+        return {
+            'total_assets': 0,
+            'unique_customers': 0,
+            'columns': [],
+            'sample': []
+        }
+    
+    # Get all unique columns from raw_data
+    all_columns = set()
+    for asset in assets:
+        if asset.raw_data:
+            all_columns.update(asset.raw_data.keys())
+    
+    # Build comprehensive statistics for ALL key columns
+    # This gives AI complete information without sending raw records
+    stats = {}
+    
+    # Collect all data for analysis
+    for col in ['Customer', 'Failtype', 'status', 'error_type', 'Location', 'Mfg Date Code', 
+                'Failing suite', 'L1', 'L2', 'ATE', 'SLT', 'CESLT', 'OSV']:
+        values = {}
+        for asset in assets:
+            if col == 'status':
+                val = asset.status
+            elif col == 'error_type':
+                val = asset.error_type
+            elif asset.raw_data and col in asset.raw_data:
+                val = asset.raw_data[col]
+            else:
+                continue
+            
+            if val and val != 'nan':
+                values[val] = values.get(val, 0) + 1
+        
+        if values:
+            stats[col] = dict(sorted(values.items(), key=lambda x: x[1], reverse=True))
+    
+    # Get ALL serial numbers (small dataset, we can afford this)
+    all_serials = [asset.serial_number for asset in assets if asset.serial_number]
+    
+    # Cross-tabulation: Customer x Error Type
+    customer_errors = {}
+    for asset in assets:
+        customer = asset.raw_data.get('Customer') if asset.raw_data else None
+        error = asset.error_type
+        if customer and error:
+            key = f"{customer}|{error}"
+            customer_errors[key] = customer_errors.get(key, 0) + 1
+    
+    # Time series: failures by date
+    failures_by_date = {}
+    for asset in assets:
+        if asset.ingest_timestamp:
+            date_key = asset.ingest_timestamp.strftime('%Y-%m-%d')
+            failures_by_date[date_key] = failures_by_date.get(date_key, 0) + 1
+    
+    # Get representative samples from each major category
+    sample = []
+    sampled_customers = set()
+    for asset in assets[:5]:  # First 5 as general samples
+        sample.append({
+            'serial_number': asset.serial_number,
+            'error_type': asset.error_type,
+            'status': asset.status,
+            **asset.raw_data
+        })
+        if asset.raw_data and 'Customer' in asset.raw_data:
+            sampled_customers.add(asset.raw_data['Customer'])
+    
+    # Add one sample from each remaining customer
+    for asset in assets:
+        if asset.raw_data and 'Customer' in asset.raw_data:
+            customer = asset.raw_data['Customer']
+            if customer not in sampled_customers and len(sample) < 10:
+                sample.append({
+                    'serial_number': asset.serial_number,
+                    'error_type': asset.error_type,
+                    'status': asset.status,
+                    **asset.raw_data
+                })
+                sampled_customers.add(customer)
+    
+    return {
+        'total_assets': len(assets),
+        'unique_customers': len(stats.get('Customer', {})),
+        'all_serial_numbers': all_serials,  # Complete list for small datasets
+        'complete_statistics': stats,  # Value counts for ALL records in each column
+        'customer_error_matrix': customer_errors,  # Customer x Error cross-tab
+        'timeline': dict(sorted(failures_by_date.items())),  # Failures over time
+        'columns': sorted(list(all_columns)),
+        'sample': sample  # Representative samples for context
+    }
+
+
+async def _get_dataframe(
+    session: AsyncSession,
+    file_ids: Optional[List[str]] = None,
+    limit: int = 50000
+) -> pd.DataFrame:
+    """Get data as pandas DataFrame for AI analysis"""
+    query = select(Asset)
+    if file_ids:
+        query = query.where(Asset.source_filename.in_(file_ids))
+    
+    query = query.limit(limit)
+    result = await session.execute(query)
+    assets = result.scalars().all()
+    
+    if not assets:
+        return pd.DataFrame()
+    
+    # Convert to list of dicts
+    data = []
+    for asset in assets:
+        row = {
+            'id': str(asset.id),
+            'serial_number': asset.serial_number,
+            'error_type': asset.error_type,
+            'status': asset.status,
+            'source_filename': asset.source_filename,
+            'ingest_timestamp': asset.ingest_timestamp
+        }
+        if asset.raw_data:
+            row.update(asset.raw_data)
+        data.append(row)
+    
+    return pd.DataFrame(data)
 
 
 if __name__ == "__main__":

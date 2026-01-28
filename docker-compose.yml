@@ -27,6 +27,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://silicon_user:silicon_pass@postgres:5432/silicon_trace_db
       HOST: 0.0.0.0
       PORT: 8000
+      NABU_API_TOKEN: ${NABU_API_TOKEN:-11b3446d3714401a8bc89eba04c4e343}
     ports:
       - "8000:8000"  # For local development - can run Streamlit outside Docker
     volumes:
@@ -45,7 +46,7 @@ services:
       dockerfile: Dockerfile
     container_name: silicon_trace_frontend
     environment:
-      API_URL: http://localhost:8000  # For standalone mode; nginx uses /api
+      API_URL: http://backend:8000  # Docker service name
     ports:
       - "8501:8501"  # For local development access
     volumes:

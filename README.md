@@ -1,10 +1,20 @@
-# 🔍 Silicon Trace v3.0
+# 🔍 Silicon Trace v3.1
 
-**Hardware Failure Analysis Tool**
+**Hardware Failure Analysis Tool with AI Co-Analyst**
 
-A powerful local application for intelligent parsing and analysis of hardware failure data from Excel and PowerPoint files. Built with FastAPI, PostgreSQL, and Streamlit.
+A powerful local application for intelligent parsing and analysis of hardware failure data from Excel and PowerPoint files. Now featuring **AI-powered conversational analytics** with AMD Nabu AI. Built with FastAPI, PostgreSQL, and Streamlit.
 
 ## ✨ Key Features
+
+### 🤖 AI Co-Analyst (v3.1)
+- **Conversational Analytics**: Ask questions about your data in natural language with full database visibility
+- **Auto-Insights**: AI automatically analyzes complete dataset and provides key findings
+- **Dynamic Visualizations**: Generate custom charts by describing them - AI creates proper aggregations
+- **Root Cause Analysis**: Multi-step autonomous investigation with AI agent
+- **Safe Code Execution**: AI-generated code runs in sandboxed environment with pre-imported libraries
+- **AMD Nabu Integration**: Uses internal AMD AI - all data stays private
+- **Statistical Compression**: AI has complete statistics about all records (customers, errors, timelines) without sending raw data
+- **Integrated Interface**: AI Co-Analyst appears as 5th tab - automatically uses data from File Manager
 
 ### 🎯 Intelligent Data Processing (v3.0)
 - **Smart Multi-Format Parser**: Automatically processes Excel (.xlsx, .xls) and PowerPoint (.pptx) files
@@ -101,23 +111,35 @@ This single command will:
 - Launch the Streamlit frontend
 - Open the app at http://localhost:8501
 
+3. **Configure AI Co-Analyst** (Optional but recommended)
+   ```powershell
+   # Copy environment template
+   cp .env.example .env
+   
+   # Edit .env and add your Nabu API token
+   # NABU_API_TOKEN=your_token_here
+   ```
+
 ## Architecture
 
 ```
-Silicon Trace v3.0/
+Silicon Trace v3.1/
 ├── backend/           # FastAPI application
-│   ├── main.py       # API endpoints (limit: 50,000 assets)
+│   ├── main.py       # API endpoints + AI endpoints (v3.1)
 │   ├── models.py     # SQLModel database models
 │   ├── parser.py     # Intelligent Excel parser
 │   ├── pptx_parser.py # PowerPoint parser with OCR support
+│   ├── nabu_client.py # AMD Nabu AI client (v3.1 NEW)
+│   ├── code_sandbox.py # Safe code execution (v3.1 NEW)
 │   ├── database.py   # Async PostgreSQL connection
 │   └── Dockerfile    # Backend container
 ├── frontend/         # Streamlit dashboard
-│   ├── app.py        # Main UI with multi-criteria search
+│   ├── app.py        # Main UI with AI Co-Analyst integrated
 │   └── requirements.txt
 ├── data/            # Place your Excel/PowerPoint files here (not committed)
 ├── docker-compose.yml
-└── start.ps1        # All-in-one startup script
+├── start.ps1        # All-in-one startup script
+└── README.md        # This file
 ```
 
 ## Usage
@@ -226,6 +248,53 @@ The parser will:
    - **Tab 5 - Platform Analysis**: Platform performance across tiers
    - **Tab 6 - Time Trends**: Failure rates over time with trend insights
 
+### AI Co-Analyst (v3.1 NEW) 🤖
+
+Navigate to the **"AI Co-Analyst"** tab (5th tab after Analytics) for intelligent data analysis. All data from File Manager is automatically available - no file selection needed.
+
+#### 💬 Chat Mode
+- Ask questions in natural language about your **complete dataset**
+- AI has access to full statistics for all records (not just samples)
+- Get data-driven answers with exact counts and percentages
+- AI remembers conversation history
+- Request visualizations on-the-fly
+
+**Examples:**
+- "List all serial numbers from the database"
+- "Which customer has the most failures and how many?"
+- "Show me exact counts for each error type"
+- "What's the timeline of failures by date?"
+- "Compare failure rates by customer with exact numbers"
+
+#### 🔍 Auto-Insights Mode
+- Click "Analyze" for automatic analysis
+- Get key metrics, insights, anomalies, recommendations
+- Focus on specific areas (failures, customers, trends, errors, tiers)
+- Executive summary in seconds
+
+#### automatically creates proper aggregations for categorical data
+- Generates and renders charts live using Plotly
+- View/download generated Python code
+- Export visualizations as HTML
+
+**Examples:**
+- "Create a bar graph of all High Failure Rate at ATE"
+- "Show a Sankey diagram of tier progression"
+- "Make a heatmap of errors vs customers"
+- "Create a timeline of failures with trendline"
+- "Create a sunburst chart of customer → tier → errorssion"
+- "Make a heatmap of errors vs customers"
+- "Create a 3D scatter plot of failures"
+
+#### 🔬 Root Cause Analysis
+- Select investigation topic or describe custom investigation
+- AI performs multi-step autonomous analysis
+- Get hypothesis, investigation steps, findings
+- Root causes identified with confidence levels
+- Actionable recommendations provided
+
+**Investigation Depth**: Set 3-10 steps for analysis
+
 ## Serial Number Detection
 
 The parser uses weighted scoring to detect serial number columns:
@@ -239,14 +308,22 @@ The parser uses weighted scoring to detect serial number columns:
 **Pattern Matching**:
 - **CPU SN Format** (1.5x score): `9AMA377P50091_100-000001359`
 - **Standard Format** (1.0x score): Alphanumeric 8-25 chars
-- **Extended Format** (0.8x score): With underscores/dashes
+- **Extended For
 
-## API Endpoints (v3.0)
-
+### Data Management
 - `POST /upload` - Upload and parse Excel/PowerPoint files (blocks duplicate filenames)
 - `GET /assets` - List all assets (supports filtering by source files, limit up to 50,000)
 - `GET /assets/{serial_number}` - Get specific asset with merged data
 - `GET /search?q={query}` - Search assets
+- `GET /source-files` - List all source files with counts and last updated timestamp
+- `GET /files` - Get list of uploaded files
+- `DELETE /source-files/{filename}` - Delete all assets from a file
+
+### AI Co-Analyst (v3.1)
+- `POST /ai/chat` - Natural language Q&A with conversation history
+- `POST /ai/analyze` - Auto-insights with focus area support
+- `POST /ai/visualize` - Generate custom visualizations from descriptions
+- `POST /ai/investigate` - Root cause analysis with multi-step investigation
 - `GET /source-files` - List all source files with counts and last updated timestamp
 - `DELETE /source-files/{filename}` - Delete all assets from a file
 
@@ -363,13 +440,16 @@ uvicorn main:app --reload
   - PowerPoint: python-pptx 0.6.21, pytesseract (OCR), Pillow
 - **Features**: 
   - Multi-file merging with column normalization
+  - AI Platform**: AMD Nabu AI with httpx async client
+- **Code Execution**: Custom sandboxed environment with Plotly, pandas, numpy
+- **Parser**: 
+  - Excel: pandas 2.2.0, openpyxl 3.1.2, intelligent column detection
+  - PowerPoint: python-pptx 0.6.21, pytesseract (OCR), Pillow
+- **Features**: 
+  - Multi-file merging with column normalization
   - Multi-criteria search with AND/OR logic
   - Customer segmentation across all visualizations
-  - Tier analysis with 7-tab comprehensive visualization
-## Tech Stack
-
-- **Backend**: FastAPI 0.109.0, SQLModel, asyncpg, pandas 2.2.0
-- **Database**: PostgreSQL 15 (Docker) with JSONB support
+  - AI-powered analytics with statistical compressionupport
 - **Frontend**: Streamlit 1.53.1, matplotlib 3.10.8, pandas dataframes
 - **Parser**: 
   - Excel: pandas 2.2.0, openpyxl 3.1.2, intelligent column detection
@@ -382,10 +462,34 @@ uvicorn main:app --reload
   - Chinese translation (langdetect)
   - Up to 50,000 assets display support
 - **Container**: Docker Compose for orchestration
+ - Current)
+- 🤖 **AI Co-Analyst Integration**: AMD Nabu AI-powered conversational analytics
+  - **Chat Mode**: Natural language Q&A with full database visibility via statistical compression
+  - **Auto-Insights**: Automatic pattern detection, anomaly identification, and recommendations
+  - **Visualization Studio**: AI-generated dynamic Plotly charts with automatic data aggregation
+  - **Root Cause Analysis**: Multi-step autonomous investigation agent
+- 🔒 **Safe Code Execution**: Sandboxed environment with pre-imported libraries (Plotly, pandas, numpy)
+- 📊 **Statistical Compression**: AI accesses complete dataset statistics without raw data overhead
+  - All serial numbers, customer counts, error distributions, timelines
+  - Token-efficient approach scales to ~1000 records
+  - Provides exact counts and complete visibility
+- 🔧 **Backend Enhancements**: 
+  - New AI endpoints: `/ai/chat`, `/ai/analyze`, `/ai/visualize`, `/ai/investigate`
+  - AMD Nabu AI client (`nabu_client.py`) with unified response parsing
+  - Code sandbox (`code_sandbox.py`) for safe execution
+  - Enhanced data context with comprehensive statistics
+  - `/files` endpoint for file list
+- 🎨 **Integrated UI**: AI Co-Analyst appears as 5th tab, uses data directly from database
+- 🐛 **Bug Fixes**: 
+  - Fixed timestamp JSON serialization across all AI methods
+  - Fixed Nabu API response parsing (responseText field)
+  - Fixed code extraction (removed import statements, fig.show() calls, encoding artifacts)
+  - Fixed bar chart and timeline generation with proper aggregations
+  - AMD Nabu AI client with async support
+  - `/files` endpoint for file list
+- 🎨 **Integrated UI**: AI Co-Analyst appears as 5th tab, uses data directly from database
 
-## Version History
-
-### **Tier Analysis**: Comprehensive test tier progression tracking with 7-tab visualization
+### v3.0 (Major Feature Release)
   - Automatic tier column detection (L1, L2, ATE, SLT, Tier0-5, FS1, FS2, etc.)
   - Test Journey table showing complete progression per asset
   - Tier Waterfall, Customer Journey, Heatmap, Owner Workload, Platform Analysis, Time Trends
@@ -415,7 +519,7 @@ uvicorn main:app --reload
 - 🎯 Multi-sheet support
 - 🎯 Basic dashboard
 
-## License
+## License1
 
 MIT License - See LICENSE file for details
 
