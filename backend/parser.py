@@ -418,11 +418,33 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
             
             # Handle multi-row headers
             if len(header_rows) > 1:
-                # Multi-row header detected - use the LAST header row (most specific)
-                # This handles cases like: Row 0 = "Tier0 - Suzhou", Row 1 = "L1", "L2", "ATE"
-                # We want Row 1 (the actual test names), not Row 0 (the category)
-                print(f"Sheet '{sheet_name}': Detected multi-row header (rows {header_rows}), using row {header_rows[-1]}")
-                df = pd.read_excel(file_path, sheet_name=sheet_name, header=header_rows[-1])
+                # Multi-row header detected - read ALL header rows and merge them
+                # This handles cases where some columns (Customer, Serial) are in row 0
+                # and tier columns (L1, L2, ATE) are in row 1
+                print(f"Sheet '{sheet_name}': Detected multi-row header (rows {header_rows}), merging headers")
+                df = pd.read_excel(file_path, sheet_name=sheet_name, header=header_rows)
+                
+                # Flatten multi-index columns by combining non-null parts
+                if isinstance(df.columns, pd.MultiIndex):
+                    new_columns = []
+                    for col_tuple in df.columns:
+                        # Combine all non-null, non-"Unnamed" parts of the header
+                        parts = []
+                        for part in col_tuple:
+                            part_str = str(part).strip()
+                            if part_str and part_str.lower() != 'nan' and not part_str.startswith('Unnamed'):
+                                parts.append(part_str)
+                        
+                        # Use the last meaningful part, or first if last is missing
+                        if parts:
+                            # Prefer the most specific (last) name
+                            new_columns.append(parts[-1] if parts[-1] not in ['nan', ''] else parts[0])
+                        else:
+                            # All parts were Unnamed or NaN - use original
+                            new_columns.append('_'.join(str(p) for p in col_tuple))
+                    
+                    df.columns = new_columns
+                    print(f"Sheet '{sheet_name}': Merged multi-row headers")
             elif len(header_rows) == 1:
                 print(f"Sheet '{sheet_name}': Detected single header at row {header_rows[0]}")
                 df = pd.read_excel(file_path, sheet_name=sheet_name, header=header_rows[0])
@@ -441,6 +463,17 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
                 print(f"Skipping sheet '{sheet_name}': too many rows ({len(df)} > {MAX_SHEET_ROWS})")
                 continue
             
+            # Handle merged cells by forward-filling customer columns
+            # Merged cells in Excel appear as NaN in all but the first row
+            customer_keywords = ['customer', 'client', 'end_customer', 'end customer', 
+                               'customer_name', 'customer name', '客户', 'cust']
+            for col in df.columns:
+                col_lower = col.lower().strip()
+                if any(kw in col_lower for kw in customer_keywords):
+                    # Forward fill the customer column to handle merged cells
+                    df[col] = df[col].ffill()  # Use ffill() instead of deprecated fillna(method='ffill')
+                    print(f"Forward-filled merged cells in customer column: '{col}'")
+            
             # Detect serial number column for this sheet
             serial_column = SerialNumberDetector.detect_serial_column(df)
             
@@ -456,6 +489,11 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
             status_column = None
             component_column = None
             
+            # Detect tier test columns for tier-structured data
+            tier_keywords = ['l1', 'l2', 'slt', 'ceslt', 'osv', 'afhc', 'ate', 'ft1', 'ft2', 
+                           'fs1', 'fs2', 'diag', 'charz', 'shak', 'kvm', 'wl:', 'hdrt', 'difect']
+            tier_columns = []
+            
             for col in df.columns:
                 col_lower = col.lower().strip()
                 if 'error' in col_lower or 'failure' in col_lower or 'issue' in col_lower or 'symptom' in col_lower:
@@ -464,6 +502,12 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
                     status_column = col
                 if 'component' in col_lower or 'part' in col_lower or 'child' in col_lower:
                     component_column = col
+                
+                # Check if this is a tier test column
+                # Exclude status/debug/date columns
+                if not any(exclude in col_lower for exclude in ['status', 'result', 'plan', 'comment', 'debug', 'repro status', 'date', 'timestamp']):
+                    if any(tier_kw in col_lower for tier_kw in tier_keywords):
+                        tier_columns.append(col)
             
             # Process each row in this sheet
             for idx, row in df.iterrows():
@@ -519,10 +563,54 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
                     if error_value and not combined_data[serial_number]['error_type']:
                         combined_data[serial_number]['error_type'] = str(error_value)
                 
+                # If no traditional error column found, try to extract error from tier test results
+                if not error_column and tier_columns and not combined_data[serial_number]['error_type']:
+                    # Check tier columns for failures
+                    failed_tiers = []
+                    for tier_col in tier_columns:
+                        if tier_col in row:
+                            value = clean_value(row[tier_col])
+                            if value:
+                                value_upper = str(value).upper().strip()
+                                # Check if it's a failure (not PASS/NFF/NFT/NOT RUN/N/A)
+                                if value_upper not in ['PASS', 'PASSED', 'NFF', 'NFT', 'NOT RUN', 'N/A', 'NA', '']:
+                                    # It's a failure or uncertain result
+                                    if not value_upper.startswith('NFF') and not value_upper.startswith('NFT'):
+                                        failed_tiers.append(tier_col)
+                    
+                    if failed_tiers:
+                        # Use the first failed tier as the error type
+                        combined_data[serial_number]['error_type'] = f"Failed at: {failed_tiers[0]}"
+                
                 if status_column and status_column in row:
                     status_value = clean_value(row[status_column])
                     if status_value and not combined_data[serial_number]['status']:
                         combined_data[serial_number]['status'] = str(status_value)
+                
+                # If no traditional status column, infer status from tier results
+                if not status_column and tier_columns and not combined_data[serial_number]['status']:
+                    has_any_tier = False
+                    has_failure = False
+                    has_pass = False
+                    
+                    for tier_col in tier_columns:
+                        if tier_col in row:
+                            value = clean_value(row[tier_col])
+                            if value:
+                                has_any_tier = True
+                                value_upper = str(value).upper().strip()
+                                if value_upper in ['PASS', 'PASSED', 'NFF', 'NFT']:
+                                    has_pass = True
+                                elif value_upper not in ['NOT RUN', 'N/A', 'NA', '']:
+                                    has_failure = True
+                    
+                    if has_any_tier:
+                        if has_failure:
+                            combined_data[serial_number]['status'] = 'Failed'
+                        elif has_pass:
+                            combined_data[serial_number]['status'] = 'Passed'
+                        else:
+                            combined_data[serial_number]['status'] = 'Not Run'
                 
                 # Merge raw_data from this sheet
                 # Smart column merging: normalize column names to handle case/space differences
