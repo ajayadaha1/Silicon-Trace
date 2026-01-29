@@ -525,7 +525,8 @@ def get_key_columns(asset: Dict[str, Any]) -> Dict[str, str]:
     }
     
     # Try to match fields using schema map (no translation here for performance)
-    for display_name, field_type in [('Date', 'date'), ('Error', 'error'), 
+    # IMPORTANT: Skip 'error' field lookup since we use normalized error_type from database
+    for display_name, field_type in [('Date', 'date'), 
                                      ('Status', 'status'), ('Component', 'component')]:
         keywords = SCHEMA_MAP.get(field_type, [])
         
@@ -573,6 +574,53 @@ def get_key_columns(asset: Dict[str, Any]) -> Dict[str, str]:
                     break
     
     return result
+
+
+def extract_tier_name(column_name: str) -> str:
+    """
+    Extract tier name while preserving structure from Excel headers.
+    Handles combined multi-row headers like "Tier1 - ATE - FT1".
+    Examples:
+    - "Tier1 - ATE - FT1" -> "Tier1-ATE-FT1"
+    - "Tier0 - Suzhou - L1" -> "Tier0-L1"
+    - "L1" -> "L1"
+    - "SLT Date" -> "SLT"
+    """
+    import re
+    
+    col = column_name.strip()
+    
+    # Handle multi-part tier names from merged headers: "Tier# - Group - Test"
+    # Example: "Tier1 - ATE - FT1" → "Tier1-FT1" (simplified for display)
+    if ' - ' in col:
+        parts = [p.strip() for p in col.split(' - ')]
+        # Keep tier number and last part (the specific test name)
+        if len(parts) >= 3 and parts[0].startswith('Tier'):
+            # "Tier1 - ATE - FT1" → "Tier1-FT1"
+            return f"{parts[0]}-{parts[-1]}"
+        elif len(parts) == 2:
+            # "Tier1 - ATE" → "Tier1-ATE"
+            return '-'.join(parts)
+    
+    # If it's a simple tier name already (L1, L2, ATE, SLT, etc.), return as-is
+    simple_tiers = ['l1', 'l2', 'l3', 'ate', 'slt', 'ceslt', 'osv', 'afhc', 
+                   'ft1', 'ft2', 'fs1', 'fs2', 'tier0', 'tier1', 'tier2', 
+                   'tier3', 'tier4', 'tier5']
+    
+    col_lower = col.lower().strip()
+    for tier in simple_tiers:
+        if col_lower == tier or col_lower.startswith(tier + ' ') or col_lower.endswith(' ' + tier):
+            return tier.upper()
+    
+    # Extract tier name from bullet/messy format: "• ATE test" or "Tencent • SLT"
+    for tier in simple_tiers:
+        if tier in col_lower:
+            return tier.upper()
+    
+    # Fallback: Clean up and truncate
+    cleaned = re.sub(r'[•·]', '', col)  # Remove bullets
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()  # Normalize whitespace
+    return cleaned[:12].upper()
 
 
 def extract_status_from_text(text: str) -> str:
@@ -1907,8 +1955,9 @@ elif st.session_state.page == "Trace":
                 show_asset_details()
         
         elif view_mode == "📄 Complete View":
-            # Complete View: Show all columns from raw_data
+            # Complete View: Show all columns from raw_data with visual indicators for normalized columns
             st.caption(f"Showing {len(assets)} assets with all available columns - Click on any row to see full details")
+            st.info("🔄 = Column normalized for analytics | Original values preserved")
             
             # Create a dynamic table with ALL columns from raw_data
             assets_list = []
@@ -1919,13 +1968,32 @@ elif st.session_state.page == "Trace":
                     'Ingested': str(a['ingest_timestamp'][:10]) if a.get('ingest_timestamp') else 'N/A',
                     'Source File': str(a.get('source_filename', 'N/A'))
                 }
+                
+                # Get metadata about normalized columns
+                raw_data = a.get('raw_data', {})
+                error_sources = raw_data.get('_error_sources', [])
+                column_classification = raw_data.get('_column_classification', {})
+                
                 # Add all columns from raw_data
-                if a.get('raw_data'):
-                    for key, value in a['raw_data'].items():
+                if raw_data:
+                    for key, value in raw_data.items():
                         # Skip metadata fields
-                        if not key.startswith('_'):
-                            # Convert all values to strings to avoid Arrow type errors
-                            asset_row[key] = str(value) if value is not None else 'N/A'
+                        if key.startswith('_'):
+                            continue
+                        
+                        # Determine if this column was normalized
+                        display_key = key
+                        col_category = column_classification.get(key, "")
+                        
+                        # Add visual indicator for normalized columns
+                        if col_category in ["ERROR_TYPE", "STATUS"]:
+                            display_key = f"🔄 {key}"
+                        elif key in error_sources or any(key in str(src) for src in error_sources):
+                            display_key = f"🔄 {key}"
+                        
+                        # Convert all values to strings to avoid Arrow type errors
+                        asset_row[display_key] = str(value) if value is not None else 'N/A'
+                
                 assets_list.append(asset_row)
             
             # Create DataFrame and explicitly convert all columns to string type
@@ -2333,34 +2401,42 @@ elif st.session_state.page == "Analytics":
                 # Sort tier columns by their tier level for proper progression analysis
                 # Tier order: tier0/l1/l2 -> tier1/ate ft -> tier2/slt -> tier3/fs1 -> tier4/diag -> tier5/fs2/wl
                 def get_tier_order(col_name):
+                    import re
                     col_lower = col_name.lower()
+                    
+                    # Handle multi-part column names from merged headers: "Tier# - Group - Test"
+                    # Extract the tier number if present
+                    tier_match = re.search(r'tier\s*(\d+)', col_lower)
+                    if tier_match:
+                        tier_num = int(tier_match.group(1))
+                        return (tier_num, col_name)
+                    
                     # Assign order priority - check for exact matches and substrings
                     
                     # Tier 0: Basic tests (L1, L2, ATE, SLT, CESLT, OSV, AFHC at Suzhou)
                     # These are standalone simple names under Tier0-Suzhou header
                     if (col_lower in ['l1', 'l2', 'ate', 'slt', 'ceslt', 'osv'] or 
-                        'afhc at suzhou' in col_lower or 'suzhou' in col_lower or
-                        any(x in col_lower for x in ['tier0', 'tier 0'])):
+                        'afhc at suzhou' in col_lower or 'suzhou' in col_lower):
                         return (0, col_name)
                     
                     # Tier 1: ATE detailed tests (ATE FT1, ATE FT2, Per Core Charz)
-                    elif any(x in col_lower for x in ['tier1', 'tier 1', 'ate ft', 'ft1', 'ft2', 'per core', 'core char']):
+                    elif any(x in col_lower for x in ['ate ft', 'ft1', 'ft2', 'per core', 'core char']):
                         return (1, col_name)
                     
                     # Tier 2: SLT tests (SLT1, SLT2, SLT perCCD)
-                    elif any(x in col_lower for x in ['tier2', 'tier 2', 'slt1', 'slt2', 'slt per', 'perccd']):
+                    elif any(x in col_lower for x in ['slt1', 'slt2', 'slt per', 'perccd']):
                         return (2, col_name)
                     
                     # Tier 3: FS1 tests
-                    elif any(x in col_lower for x in ['tier3', 'tier 3', 'fs1', 'l3 repro', 'afhc det', 'repro']):
+                    elif any(x in col_lower for x in ['fs1', 'l3 repro', 'afhc det', 'repro']):
                         return (3, col_name)
                     
                     # Tier 4: Diag tests
-                    elif any(x in col_lower for x in ['tier4', 'tier 4', 'diag', 'extended diag', 'shak', 'kvm']):
+                    elif any(x in col_lower for x in ['diag', 'extended diag', 'shak', 'kvm']):
                         return (4, col_name)
                     
                     # Tier 5: FS2 / WL tests
-                    elif any(x in col_lower for x in ['tier5', 'tier 5', 'fs2', 'wl:', 'wl ', 'variable fan', 'freq exp', 'voltage exp', 'v + freq', 'nominal']):
+                    elif any(x in col_lower for x in ['fs2', 'wl:', 'wl ', 'variable fan', 'freq exp', 'voltage exp', 'v + freq', 'nominal']):
                         return (5, col_name)
                     
                     else:
@@ -2400,11 +2476,15 @@ elif st.session_state.page == "Analytics":
                 
                 # Find the first failing tier in progression order
                 first_fail_tier = None
+                first_fail_value = None
+                first_fail_tier_num = None
                 if has_any_failure:
                     for tier_col, tier_value in tier_columns_sorted:
                         if is_failure(tier_value):
                             first_fail_tier = tier_col
-                            logger.info(f"  First failure detected at: {tier_col} (value: '{tier_value}')")
+                            first_fail_value = tier_value
+                            first_fail_tier_num = get_tier_order(tier_col)[0]
+                            logger.info(f"  First failure detected at: {tier_col} (value: '{tier_value}', tier_num: {first_fail_tier_num})")
                             break
                 
                 # Determine grouping
@@ -2418,9 +2498,17 @@ elif st.session_state.page == "Analytics":
                     logger.info(f"  → Decision: All tests are 'Not run'")
                     logger.info(f"  → Group: {group_key}")
                 elif first_fail_tier:
-                    # Simplify tier name for grouping
-                    tier_name = first_fail_tier.replace(':', '').replace('_', ' ').strip()
-                    group_key = f"❌ Failed at: {tier_name}"
+                    # Extract clean tier name and append failure type
+                    tier_clean = extract_tier_name(first_fail_tier)
+                    # Shorten failure value for grouping (max 30 chars)
+                    fail_short = str(first_fail_value)[:30] if first_fail_value else 'Unknown'
+                    
+                    # If tier number is 99 (unknown tier), group as "No Tier Data" instead of "Tier99"
+                    if first_fail_tier_num == 99:
+                        group_key = f"❓ No Tier Data - {tier_clean}: {fail_short}"
+                    else:
+                        group_key = f"❌ Tier{first_fail_tier_num} {tier_clean}: {fail_short}"
+                    
                     logger.info(f"  → Decision: Has failure at first failing tier")
                     logger.info(f"  → Group: {group_key}")
                 elif has_any_pass and not has_any_failure and not has_any_not_run:
@@ -2605,6 +2693,11 @@ elif st.session_state.page == "Analytics":
                                     row = {'Serial Number': asset.get('serial_number', 'N/A')}
                                     raw_data = asset.get('raw_data', {})
                                     
+                                    # Add tracking number if available
+                                    tracking = raw_data.get('_tracking_number')
+                                    if tracking:
+                                        row['Tracking #'] = str(tracking)
+                                    
                                     # Add customer if available
                                     customer_keywords = ['customer', 'client']
                                     for key, value in raw_data.items():
@@ -2612,23 +2705,25 @@ elif st.session_state.page == "Analytics":
                                             row['Customer'] = str(value).strip().upper()[:10]
                                             break
                                     
-                                    # Add all tier columns
+                                    # Add all tier columns with cleaned names
                                     for tier_col in all_tier_cols[:15]:  # Limit to 15 tier columns for width
-                                        tier_short = tier_col.replace(':', '').replace('_', ' ')[:15]
+                                        # Extract clean tier name
+                                        tier_clean = extract_tier_name(tier_col)
+                                        
                                         value = raw_data.get(tier_col, '')
                                         
                                         if value:
                                             val_upper = str(value).strip().upper()
                                             if val_upper in ['NFT', 'NFF', 'PASS', 'PASSED']:
-                                                row[tier_short] = '✅ PASS'
+                                                row[tier_clean] = f'{tier_clean}: ✅ PASS'
                                             elif val_upper in ['NOT RUN', 'N/A', 'NA', '']:
-                                                row[tier_short] = '⏸️ NOT RUN'
+                                                row[tier_clean] = f'{tier_clean}: ⏸️ NOT RUN'
                                             else:
-                                                # Show actual failure reason (truncated)
+                                                # Show tier name + actual failure reason (truncated)
                                                 fail_reason = str(value)[:20]
-                                                row[tier_short] = f'❌ {fail_reason}'
+                                                row[tier_clean] = f'{tier_clean}: ❌ {fail_reason}'
                                         else:
-                                            row[tier_short] = '⏸️ NOT RUN'
+                                            row[tier_clean] = f'{tier_clean}: ⏸️ NOT RUN'
                                     
                                     journey_data.append(row)
                                 

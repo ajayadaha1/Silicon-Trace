@@ -3,13 +3,19 @@ Intelligent Excel parser for Silicon Trace.
 
 This module implements heuristic-based column detection to identify serial numbers
 in Excel files with inconsistent or varying column headers.
+
+Now includes Nabu AI-powered column classification and data normalization.
 """
 
 import re
+import os
 from typing import List, Dict, Any, Tuple, Optional
 import pandas as pd
 import numpy as np
 from pathlib import Path
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from column_classifier import ColumnClassifier, clean_error_type_with_nabu
 
 
 class SerialNumberDetector:
@@ -370,10 +376,46 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
     SKIP_SHEET_PATTERNS = ['datecode', 'lookup', 'reference', 'master', 'database', 'template']
     MAX_SHEET_ROWS = 2000  # Skip sheets with more than this many rows (likely reference data)
     
+    # Initialize column classifier for Nabu AI-powered classification
+    classifier = ColumnClassifier()
+    all_columns_across_sheets = set()
+    sheet_dataframes = {}  # Store DataFrames for second pass
+    
+    # First pass: Collect all columns from all sheets
+    print("📊 First pass: Collecting columns from all sheets...")
+    for sheet_name in sheet_names:
+        try:
+            # Quick skip check
+            sheet_lower = sheet_name.lower().strip()
+            if len(sheet_names) > 1 and any(pattern in sheet_lower for pattern in SKIP_SHEET_PATTERNS):
+                continue
+            
+            # Read just to get columns
+            df_peek = pd.read_excel(file_path, sheet_name=sheet_name, nrows=0)
+            all_columns_across_sheets.update(df_peek.columns)
+            
+        except Exception as e:
+            print(f"Warning: Could not peek at sheet '{sheet_name}': {str(e)}")
+            continue
+    
+    # Classify all columns using Nabu AI
+    print(f"🤖 Classifying {len(all_columns_across_sheets)} unique columns with Nabu AI...")
+    
+    # Run async classification in a new thread to avoid event loop conflicts
+    def run_async_classification():
+        return asyncio.run(classifier.classify_columns(list(all_columns_across_sheets)))
+    
+    with ThreadPoolExecutor() as executor:
+        future = executor.submit(run_async_classification)
+        column_classification = future.result()
+    
+    print(f"✓ Column classification complete: {len(column_classification)} columns classified")
+    
     # Dictionary to store combined data by serial number
     combined_data: Dict[str, Dict[str, Any]] = {}
     
-    # Process each sheet
+    # Second pass: Process each sheet with classification
+    print("📋 Second pass: Processing sheets with classification...")
     for sheet_name in sheet_names:
         try:
             # Check if sheet should be skipped based on name
@@ -424,7 +466,7 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
                 print(f"Sheet '{sheet_name}': Detected multi-row header (rows {header_rows}), merging headers")
                 df = pd.read_excel(file_path, sheet_name=sheet_name, header=header_rows)
                 
-                # Flatten multi-index columns by combining non-null parts
+                # Flatten multi-index columns by combining ALL parts intelligently
                 if isinstance(df.columns, pd.MultiIndex):
                     new_columns = []
                     for col_tuple in df.columns:
@@ -435,16 +477,23 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
                             if part_str and part_str.lower() != 'nan' and not part_str.startswith('Unnamed'):
                                 parts.append(part_str)
                         
-                        # Use the last meaningful part, or first if last is missing
-                        if parts:
-                            # Prefer the most specific (last) name
-                            new_columns.append(parts[-1] if parts[-1] not in ['nan', ''] else parts[0])
+                        # Combine ALL meaningful parts with " - " separator to preserve tier hierarchy
+                        # Example: ("Tier1 - ATE", "FT1") → "Tier1 - ATE - FT1"
+                        # Example: ("Tier0 - Suzhou", "L1") → "Tier0 - Suzhou - L1"
+                        if len(parts) >= 2:
+                            # Multiple header levels - combine them all
+                            combined = ' - '.join(parts)
+                            new_columns.append(combined)
+                        elif len(parts) == 1:
+                            # Single meaningful part
+                            new_columns.append(parts[0])
                         else:
                             # All parts were Unnamed or NaN - use original
                             new_columns.append('_'.join(str(p) for p in col_tuple))
                     
                     df.columns = new_columns
-                    print(f"Sheet '{sheet_name}': Merged multi-row headers")
+                    print(f"Sheet '{sheet_name}': Merged multi-row headers into {len(new_columns)} columns")
+                    print(f"Sheet '{sheet_name}': Sample merged columns: {new_columns[:10]}")
             elif len(header_rows) == 1:
                 print(f"Sheet '{sheet_name}': Detected single header at row {header_rows[0]}")
                 df = pd.read_excel(file_path, sheet_name=sheet_name, header=header_rows[0])
@@ -454,6 +503,9 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
             
             # Log columns for debugging duplicate detection
             print(f"Sheet '{sheet_name}' columns: {list(df.columns)}")
+            
+            # Collect all unique columns across sheets for classification
+            all_columns_across_sheets.update(df.columns)
             
             if df.empty:
                 continue
@@ -484,30 +536,40 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
             # Log detected column for debugging
             print(f"Sheet '{sheet_name}': Detected serial column = '{serial_column}', Rows = {len(df)}")
             
-            # Try to detect error_type, status, and component columns (optional)
-            error_column = None
+            # Use classification to identify columns intelligently
+            error_columns = []  # Can have multiple error-related columns
             status_column = None
             component_column = None
-            
-            # Detect tier test columns for tier-structured data
-            tier_keywords = ['l1', 'l2', 'slt', 'ceslt', 'osv', 'afhc', 'ate', 'ft1', 'ft2', 
-                           'fs1', 'fs2', 'diag', 'charz', 'shak', 'kvm', 'wl:', 'hdrt', 'difect']
             tier_columns = []
+            diagnostic_columns = []  # Separate diagnostic files from errors
+            description_columns = []
             
             for col in df.columns:
-                col_lower = col.lower().strip()
-                if 'error' in col_lower or 'failure' in col_lower or 'issue' in col_lower or 'symptom' in col_lower:
-                    error_column = col
-                if 'status' in col_lower or 'state' in col_lower:
-                    status_column = col
-                if 'component' in col_lower or 'part' in col_lower or 'child' in col_lower:
-                    component_column = col
+                col_category = column_classification.get(col, "IGNORE")
                 
-                # Check if this is a tier test column
-                # Exclude status/debug/date columns
-                if not any(exclude in col_lower for exclude in ['status', 'result', 'plan', 'comment', 'debug', 'repro status', 'date', 'timestamp']):
-                    if any(tier_kw in col_lower for tier_kw in tier_keywords):
-                        tier_columns.append(col)
+                if col_category == "ERROR_TYPE":
+                    error_columns.append(col)
+                elif col_category == "STATUS":
+                    if not status_column:  # Use first status column
+                        status_column = col
+                elif col_category == "TEST_TIER":
+                    tier_columns.append(col)
+                elif col_category == "DIAGNOSTIC":
+                    diagnostic_columns.append(col)
+                elif col_category == "DESCRIPTION":
+                    description_columns.append(col)
+                elif 'component' in col.lower() or 'part' in col.lower() or 'child' in col.lower():
+                    component_column = col
+            
+            # Fallback if no error columns classified (backward compatibility)
+            if not error_columns:
+                for col in df.columns:
+                    col_lower = col.lower().strip()
+                    if 'error' in col_lower or 'failure' in col_lower or 'issue' in col_lower or 'symptom' in col_lower:
+                        # But exclude diagnostic files
+                        if not any(ext in col_lower for ext in ['dump', 'log', 'file', '.tar', '.gz']):
+                            error_columns.append(col)
+                            break
             
             # Process each row in this sheet
             for idx, row in df.iterrows():
@@ -551,20 +613,40 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
                         'status': None,
                         'source_filename': source_filename,
                         'raw_data': raw_data_init,
-                        'sheets_found': [f"{sheet_name} (row {int(idx) + 2})"]
+                        'sheets_found': [f"{sheet_name} (row {int(idx) + 2})"],
+                        '_error_sources': [],  # Track which columns contributed to error_type
+                        '_diagnostic_info': {}  # Separate storage for diagnostic files
                     }
                 else:
                     # If serial number already exists from another sheet, track it
                     combined_data[serial_number]['sheets_found'].append(f"{sheet_name} (row {int(idx) + 2})")
                 
-                # Update error_type and status if found and not already set
-                if error_column and error_column in row:
-                    error_value = clean_value(row[error_column])
-                    if error_value and not combined_data[serial_number]['error_type']:
-                        combined_data[serial_number]['error_type'] = str(error_value)
+                # Collect error_type from error columns (may have multiple)
+                error_values = []
+                for error_col in error_columns:
+                    if error_col in row:
+                        error_value = clean_value(row[error_col])
+                        if error_value and str(error_value).lower() not in ['n/a', 'na', 'none', '']:
+                            # Validate it's not a file path or URL
+                            error_str = str(error_value)
+                            if not any(ext in error_str.lower() for ext in ['.tar', '.gz', '.log', 'http://', 'https://']):
+                                if len(error_str) < 100:  # Reasonable error description length
+                                    error_values.append(error_str)
+                                    combined_data[serial_number]['_error_sources'].append(error_col)
                 
-                # If no traditional error column found, try to extract error from tier test results
-                if not error_column and tier_columns and not combined_data[serial_number]['error_type']:
+                # Set error_type (prefer first valid error, will clean with Nabu later)
+                if error_values and not combined_data[serial_number]['error_type']:
+                    combined_data[serial_number]['error_type'] = error_values[0]
+                
+                # Collect diagnostic info separately
+                for diag_col in diagnostic_columns:
+                    if diag_col in row:
+                        diag_value = clean_value(row[diag_col])
+                        if diag_value:
+                            combined_data[serial_number]['_diagnostic_info'][diag_col] = str(diag_value)
+                
+                # If no error columns found, try tier test results as fallback
+                if not error_values and tier_columns and not combined_data[serial_number]['error_type']:
                     # Check tier columns for failures
                     failed_tiers = []
                     for tier_col in tier_columns:
@@ -581,7 +663,9 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
                     if failed_tiers:
                         # Use the first failed tier as the error type
                         combined_data[serial_number]['error_type'] = f"Failed at: {failed_tiers[0]}"
+                        combined_data[serial_number]['_error_sources'].append(f"tier:{failed_tiers[0]}")
                 
+                # Update status if found
                 if status_column and status_column in row:
                     status_value = clean_value(row[status_column])
                     if status_value and not combined_data[serial_number]['status']:
@@ -740,12 +824,58 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
         print(f"✓ Component redistribution: {components_redistributed} component serial numbers moved to parent systems")
         print(f"Final asset count: {len(combined_data)} (after removing components)")
     
-    # Convert to list format and add sheet information to raw_data
+    # Phase 3: Clean error_type values using Nabu AI
+    print("🧹 Phase 3: Cleaning error_type values with Nabu AI...")
+    nabu_client = None
+    try:
+        api_token = os.getenv('NABU_API_TOKEN')
+        if api_token:
+            from nabu_client import NabuClient
+            nabu_client = NabuClient(api_token=api_token)
+    except:
+        pass
+    
+    cleaned_count = 0
+    for serial_number, record in combined_data.items():
+        if record['error_type']:
+            original_error = record['error_type']
+            
+            # Clean the error type in a separate thread
+            def run_async_cleaning():
+                return asyncio.run(clean_error_type_with_nabu(original_error, nabu_client))
+            
+            with ThreadPoolExecutor() as executor:
+                future = executor.submit(run_async_cleaning)
+                cleaned_error = future.result()
+            
+            if cleaned_error != original_error:
+                record['error_type'] = cleaned_error
+                # Store original for reference
+                record['raw_data']['_original_error_type'] = original_error
+                cleaned_count += 1
+    
+    if cleaned_count > 0:
+        print(f"✓ Cleaned {cleaned_count} error_type values")
+    
+    # Convert to list format and add metadata to raw_data
     results = []
     for serial_number, record in combined_data.items():
         # Add metadata about sheets
         record['raw_data']['_sheets_combined'] = ', '.join(record['sheets_found'])
         record['raw_data']['_total_sheets'] = len(record['sheets_found'])
+        
+        # Add column classification metadata
+        record['raw_data']['_column_classification'] = column_classification
+        
+        # Store which columns were normalized
+        if record.get('_error_sources'):
+            record['raw_data']['_error_sources'] = record['_error_sources']
+            del record['_error_sources']
+        
+        # Move diagnostic info to raw_data
+        if record.get('_diagnostic_info'):
+            record['raw_data']['_diagnostic_info'] = record['_diagnostic_info']
+            del record['_diagnostic_info']
         
         # Remove the temporary sheets_found key
         del record['sheets_found']

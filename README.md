@@ -1,10 +1,23 @@
-# 🔍 Silicon Trace v3.1
+# 🔍 Silicon Trace v3.2
 
-**Hardware Failure Analysis Tool with AI Co-Analyst & MCP Server**
+**Hardware Failure Analysis Tool with AI Co-Analyst & AI-Powered Data Normalization**
 
-A powerful local application for intelligent parsing and analysis of hardware failure data from Excel and PowerPoint files. Now featuring **AI-powered conversational analytics** with AMD Nabu AI and a **Model Context Protocol (MCP) server** for scalable data access. Built with FastAPI, PostgreSQL, Streamlit, and FastMCP.
+A powerful local application for intelligent parsing and analysis of hardware failure data from Excel and PowerPoint files. Now featuring **AI-powered data normalization** with AMD Nabu AI for automatic column classification and error cleaning, plus **AI conversational analytics** and **Model Context Protocol (MCP) server** for scalable data access. Built with FastAPI, PostgreSQL, Streamlit, and FastMCP.
 
 ## ✨ Key Features
+
+### 🧹 AI-Powered Data Normalization (v3.2 - NEW!)
+- **3-Phase Nabu AI Normalization**: Intelligent data cleaning using AMD Nabu AI
+  - **Phase 1: Column Classification**: Nabu AI automatically classifies all columns into 10 categories (SERIAL_NUMBER, ERROR_TYPE, STATUS, TEST_TIER, DATE, CUSTOMER, PLATFORM, DIAGNOSTIC, DESCRIPTION, IGNORE)
+  - **Phase 2: Smart Routing**: Intelligently separates ERROR_TYPE from DIAGNOSTIC data (logs, URLs, file paths)
+  - **Phase 3: Error Cleaning**: Nabu AI cleans messy error values (dates, Chinese text, URLs, file names)
+- **Tracking Number Extraction**: Automatically detects and extracts FedEx, UPS, DHL, USPS tracking numbers into dedicated field
+- **Long Description Shortening**: Intelligently shortens verbose error descriptions to ~50 chars while preserving key information
+- **Multi-Row Header Support**: Properly handles Excel files with merged header cells (e.g., "Tier1 - ATE - FT1")
+- **Visual Indicators**: 🔄 emoji marks normalized columns in Complete View with info banner
+- **Original Data Preservation**: All original values preserved in raw_data for search and verification
+- **Bilingual Support**: Handles Chinese error descriptions (失败类型, 客户, 状态, 日期)
+- **Batch Processing**: normalize_existing_data.py script to fix existing database records
 
 ### 🤖 AI Co-Analyst (v3.1)
 - **Conversational Analytics**: Ask questions about your data in natural language with full database visibility
@@ -60,14 +73,16 @@ A powerful local application for intelligent parsing and analysis of hardware fa
 - **File-Based Filtering**: Filter assets by source file
 - **Bulk Delete**: Select and delete multiple files at once with checkboxes
 
-### 📈 Analytics (v3.0)
+### 📈 Analytics (v3.2)
 - **Grouped Analysis**: View assets by Customer, Status, Error Type, or **Tier Analysis**
 - **Interactive Rows**: Click any group row to see detailed asset list
-- **Tier Analysis** (NEW): Comprehensive test tier progression tracking
+- **Tier Analysis** (IMPROVED): Comprehensive test tier progression tracking
   - Automatically detects tier columns (L1, L2, ATE, SLT, Tier0-5, FS1, FS2, etc.)
-  - Groups assets by first failing tier
+  - **Multi-Row Header Preservation**: Properly combines tier group names (Tier1-ATE) with specific tests (FT1)
+  - Groups assets by first failing tier with failure type: "❌ Tier1 ATE: FT2 10C"
+  - Handles "No Tier Data" gracefully instead of showing "Tier99"
   - **7-Tab Analysis Dialog**:
-    - **Test Journey**: Complete tier progression table with color-coded results
+    - **Test Journey**: Complete tier progression table with color-coded results and tracking numbers
     - **Tier Waterfall**: Stacked bars showing pass/fail at each tier
     - **Customer Journey**: Which customers struggle at which test stages
     - **Tier Heatmap**: Color-coded customer vs tier matrix
