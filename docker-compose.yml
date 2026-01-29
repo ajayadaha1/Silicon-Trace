@@ -56,6 +56,23 @@ services:
     networks:
       - silicon_trace_network
 
+  mcp-server:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.mcp
+    container_name: silicon_trace_mcp
+    environment:
+      DATABASE_URL: postgresql+asyncpg://silicon_user:silicon_pass@postgres:5432/silicon_trace_db
+    ports:
+      - "8001:8000"  # MCP server on different port
+    volumes:
+      - ./backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - silicon_trace_network
+
 volumes:
   postgres_data:
 

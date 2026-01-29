@@ -50,3 +50,10 @@ tmp/
 data/*.xlsx
 data/*.xls
 data/*.csv
+# Cline storage (AI assistant internal data)
+.cline_storage/
+
+# Test files
+test_*.py
+query_*.py
+generate_samples.py

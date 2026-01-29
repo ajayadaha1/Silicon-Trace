@@ -30,7 +30,8 @@ class NabuClient:
         temperature: float = 0.7,
         max_tokens: int = 2000,
         amd_search: bool = False,
-        chat_id: Optional[str] = None
+        chat_id: Optional[str] = None,
+        mcp_servers: Optional[List[Dict[str, Any]]] = None
     ) -> Dict[str, Any]:
         """
         Send a chat message to Nabu AI
@@ -66,7 +67,7 @@ class NabuClient:
             "reasoning_effort": "",
             "max_tokens": max_tokens,
             "org_group_search_toggle": False,
-            "McpTools": []
+            "McpTools": mcp_servers or []
         }
         
         async with httpx.AsyncClient(timeout=120.0) as client:

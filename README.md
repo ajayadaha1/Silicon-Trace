@@ -1,8 +1,8 @@
 # 🔍 Silicon Trace v3.1
 
-**Hardware Failure Analysis Tool with AI Co-Analyst**
+**Hardware Failure Analysis Tool with AI Co-Analyst & MCP Server**
 
-A powerful local application for intelligent parsing and analysis of hardware failure data from Excel and PowerPoint files. Now featuring **AI-powered conversational analytics** with AMD Nabu AI. Built with FastAPI, PostgreSQL, and Streamlit.
+A powerful local application for intelligent parsing and analysis of hardware failure data from Excel and PowerPoint files. Now featuring **AI-powered conversational analytics** with AMD Nabu AI and a **Model Context Protocol (MCP) server** for scalable data access. Built with FastAPI, PostgreSQL, Streamlit, and FastMCP.
 
 ## ✨ Key Features
 
@@ -15,6 +15,16 @@ A powerful local application for intelligent parsing and analysis of hardware fa
 - **AMD Nabu Integration**: Uses internal AMD AI - all data stays private
 - **Statistical Compression**: AI has complete statistics about all records (customers, errors, timelines) without sending raw data
 - **Integrated Interface**: AI Co-Analyst appears as 5th tab - automatically uses data from File Manager
+
+### 🔌 MCP Server (v3.1)
+- **Model Context Protocol Server**: Local MCP server exposing Silicon Trace database via standardized protocol
+- **6 MCP Tools**: `query_assets`, `get_asset_details`, `get_stats`, `search_failures`, `analyze_customer`, `count_assets`
+- **4 MCP Resources**: Database summary, customer list, error types, tier statistics
+- **SSE Transport**: Server-Sent Events endpoint at `http://localhost:8001/sse`
+- **VS Code Integration**: Built-in MCP configuration for VS Code extension
+- **Future-Ready**: Designed for scalability when dataset exceeds 10,000 records
+- **Docker Deployed**: Runs as separate container with shared database access
+- **Standards-Based**: Uses FastMCP framework for MCP protocol compliance
 
 ### 🎯 Intelligent Data Processing (v3.0)
 - **Smart Multi-Format Parser**: Automatically processes Excel (.xlsx, .xls) and PowerPoint (.pptx) files
@@ -107,9 +117,10 @@ A powerful local application for intelligent parsing and analysis of hardware fa
 
 This single command will:
 - Stop any existing services
-- Start Docker containers (PostgreSQL + FastAPI backend)
+- Start Docker containers (PostgreSQL + FastAPI backend + MCP server)
 - Launch the Streamlit frontend
 - Open the app at http://localhost:8501
+- MCP server available at http://localhost:8001/sse
 
 3. **Configure AI Co-Analyst** (Optional but recommended)
    ```powershell
@@ -131,14 +142,21 @@ Silicon Trace v3.1/
 │   ├── pptx_parser.py # PowerPoint parser with OCR support
 │   ├── nabu_client.py # AMD Nabu AI client (v3.1 NEW)
 │   ├── code_sandbox.py # Safe code execution (v3.1 NEW)
+│   ├── silicon_trace_mcp.py # MCP server with 6 tools + 4 resources (v3.1 NEW)
+│   ├── queries.py    # Shared query logic for API and MCP (v3.1 NEW)
 │   ├── database.py   # Async PostgreSQL connection
-│   └── Dockerfile    # Backend container
+│   ├── Dockerfile    # Backend container
+│   └── Dockerfile.mcp # MCP server container (v3.1 NEW)
 ├── frontend/         # Streamlit dashboard
 │   ├── app.py        # Main UI with AI Co-Analyst integrated
 │   └── requirements.txt
+├── .vscode/          # VS Code configuration
+│   └── mcp.json      # MCP client configuration (v3.1 NEW)
 ├── data/            # Place your Excel/PowerPoint files here (not committed)
-├── docker-compose.yml
-├── start.ps1        # All-in-one startup script
+├── docker-compose.yml # Orchestrates 4 containers: postgres, backend, frontend, mcp-server
+├── start.ps1        # All-in-one startup script (includes MCP server)
+├── start-with-mcp.ps1 # Alternative startup with explicit MCP focus
+├── MCP_README.md    # MCP server documentation (v3.1 NEW)
 └── README.md        # This file
 ```
 
@@ -471,13 +489,24 @@ uvicorn main:app --reload
 - 🔒 **Safe Code Execution**: Sandboxed environment with pre-imported libraries (Plotly, pandas, numpy)
 - 📊 **Statistical Compression**: AI accesses complete dataset statistics without raw data overhead
   - All serial numbers, customer counts, error distributions, timelines
-  - Token-efficient approach scales to ~1000 records
+  - Token-efficient approach optimal for <10,000 records
   - Provides exact counts and complete visibility
+- 🔌 **MCP Server**: Model Context Protocol server for standardized data access
+  - **6 MCP Tools**: query_assets, get_asset_details, get_stats, search_failures, analyze_customer, count_assets
+  - **4 MCP Resources**: silicon-trace://database/summary, customers, error-types, tiers
+  - **SSE Transport**: Server-Sent Events endpoint at port 8001
+  - **VS Code Integration**: Built-in configuration for MCP extension
+  - **Docker Deployment**: Separate container with shared database
+  - **FastMCP Framework**: Standards-compliant MCP implementation (v2.14.4)
+  - **Future-Ready**: Designed for scalability when dataset grows beyond 10,000 records
+  - **Documentation**: Comprehensive MCP_README.md with tool examples
 - 🔧 **Backend Enhancements**: 
   - New AI endpoints: `/ai/chat`, `/ai/analyze`, `/ai/visualize`, `/ai/investigate`
   - AMD Nabu AI client (`nabu_client.py`) with unified response parsing
   - Code sandbox (`code_sandbox.py`) for safe execution
   - Enhanced data context with comprehensive statistics
+  - MCP server infrastructure ready for portal registration
+  - Shared query logic (`queries.py`) for API and MCP
   - `/files` endpoint for file list
 - 🎨 **Integrated UI**: AI Co-Analyst appears as 5th tab, uses data directly from database
 - 🐛 **Bug Fixes**: 
@@ -485,9 +514,6 @@ uvicorn main:app --reload
   - Fixed Nabu API response parsing (responseText field)
   - Fixed code extraction (removed import statements, fig.show() calls, encoding artifacts)
   - Fixed bar chart and timeline generation with proper aggregations
-  - AMD Nabu AI client with async support
-  - `/files` endpoint for file list
-- 🎨 **Integrated UI**: AI Co-Analyst appears as 5th tab, uses data directly from database
 
 ### v3.0 (Major Feature Release)
   - Automatic tier column detection (L1, L2, ATE, SLT, Tier0-5, FS1, FS2, etc.)
@@ -527,10 +553,41 @@ MIT License - See LICENSE file for details
 
 Contributions welcome! Please open an issue or submit a pull request.
 
+## MCP Server Usage
+
+The Silicon Trace MCP server exposes your database via the Model Context Protocol.
+
+### Tools Available
+
+1. **query_assets** - Query assets with filters (customer, error type, status, tier, date range)
+2. **get_asset_details** - Get complete details for a specific serial number
+3. **get_stats** - Get database statistics (total assets, customers, error types)
+4. **search_failures** - Search for specific failure patterns
+5. **analyze_customer** - Get detailed analysis for a specific customer
+6. **count_assets** - Count assets matching criteria
+
+### Resources Available
+
+1. **silicon-trace://database/summary** - Database overview with statistics
+2. **silicon-trace://database/customers** - List of all customers with asset counts
+3. **silicon-trace://database/error-types** - All error types with frequencies
+4. **silicon-trace://database/tiers** - Tier progression statistics
+
+### VS Code Integration
+
+The MCP server is pre-configured for VS Code:
+
+1. Install the VS Code MCP extension
+2. Configuration is already in `.vscode/mcp.json`
+3. Connect to `http://localhost:8001/sse`
+4. Use MCP tools directly in VS Code
+
+For detailed MCP documentation, see [MCP_README.md](MCP_README.md).
+
 ## Support
 
 For issues or questions, please create an issue on GitHub.
 
 ---
 
-**Silicon Trace v3.0** - Built with ❤️ for hardware failure analysis
+**Silicon Trace v3.1** - Built with ❤️ for hardware failure analysis

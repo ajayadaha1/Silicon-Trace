@@ -569,6 +569,17 @@ async def delete_source_file(
 # Configuration for Nabu API
 NABU_API_TOKEN = os.getenv("NABU_API_TOKEN", "11b3446d3714401a8bc89eba04c4e343")
 
+# MCP Server Configuration
+MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://mcp-server:8000/sse")
+# MCP Tools available to Nabu AI for dynamic querying
+MCP_SERVER_CONFIG = [
+    {
+        "name": "silicon-trace",
+        "url": MCP_SERVER_URL,
+        "description": "Silicon Trace hardware failure database with 6 query tools and 4 resources"
+    }
+]
+
 
 class ChatRequest(BaseModel):
     """Request model for AI chat"""
@@ -686,7 +697,9 @@ async def ai_analyze(
         if df.empty:
             raise HTTPException(status_code=400, detail="No data available for analysis")
         
-        # Call Nabu AI for analysis
+        # Call Nabu AI for analysis with statistical compression
+        # Note: MCP integration requires user registration in Nabu portal
+        # Using proven statistical compression approach for datasets <10K records
         nabu = get_nabu_client(NABU_API_TOKEN)
         result = await nabu.analyze_dataframe(df, request.focus_areas)
         
@@ -785,6 +798,8 @@ async def ai_investigate(
             raise HTTPException(status_code=400, detail="No data available for investigation")
         
         # Call Nabu AI for investigation
+        # Note: MCP integration requires user registration in Nabu portal
+        # Using statistical compression for datasets <10K records
         nabu = get_nabu_client(NABU_API_TOKEN)
         result = await nabu.investigate(request.topic, df, request.max_steps)
         

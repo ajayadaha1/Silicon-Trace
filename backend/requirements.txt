@@ -17,5 +17,8 @@ Pillow==10.2.0
 httpx==0.26.0
 plotly==5.18.0
 
+# MCP Server (v3.1)
+fastmcp==0.2.0
+
 # OCR support (optional - install separately if needed)
 # easyocr==1.7.0
