@@ -177,6 +177,7 @@ Categories:
 - SERIAL_NUMBER: Serial numbers, barcodes, asset IDs, PPID, CPU_SN, 2D_barcode, System SN
 - ERROR_TYPE: Error types, failures, symptoms, issues, fault codes (错误类型, Failtype, Error, Symptom)
   ⚠️ IMPORTANT: If column contains "date" or "time", classify as DATE, NOT ERROR_TYPE (e.g., "Fail Date" → DATE)
+  ⚠️ IMPORTANT: If column contains "days", "hours", "count", "quantity", classify as IGNORE, NOT ERROR_TYPE (e.g., "Fail Days" → IGNORE)
   ⚠️ IMPORTANT: Columns about failure location (failed core, failed CCD, failed die, failed DIMM) → DESCRIPTION, NOT ERROR_TYPE
 - STATUS: Status, state, resolution progress, FA status, RMA status (状态, FA状态)
 - TEST_TIER: Test stage names (L1, L2, ATE, SLT, CESLT, OSV, AFHC, FT1, FT2, Tier0-5, Stage, Phase)
@@ -188,7 +189,7 @@ Categories:
 - PLATFORM: Platform, BIOS, firmware versions, hardware config
 - DIAGNOSTIC: Log files, dump files, diagnostic paths, URLs, AFHC logs
 - DESCRIPTION: Comments, notes, observations, debug notes, summaries, failure location details (failed core/CCD/die)
-- IGNORE: Irrelevant, empty, or redundant columns (Location, Site, numeric IDs, etc.)
+- IGNORE: Irrelevant, empty, redundant columns, metrics (Location, Site, numeric IDs, "Fail Days", "Age", counts, etc.)
 
 Column headers to classify:
 {column_list}{sample_section}
@@ -233,12 +234,14 @@ Respond with a JSON object containing:
 }}
 
 Be intelligent about:
+- **METRIC/DURATION COLUMNS**: Columns about time elapsed, counts, or quantities (Fail Days, Hours, Age, Count, Quantity) → IGNORE, NEVER ERROR_TYPE
 - **FAILURE LOCATION vs ERROR TYPE**: Columns about WHERE the failure occurred (failed core, failed CCD, failed die, failed DIMM, core#, socket#) → DESCRIPTION, not ERROR_TYPE
 - **STAGE/PHASE PRIORITY**: Columns named "Stage", "Phase", or containing test stage values (e.g., "Online Fail", "IDC Acceptance") are TEST_TIER, NEVER CUSTOMER
 - **DATE PRIORITY**: Columns with "date", "time", or "timestamp" are ALWAYS DATE category, even if they also contain "fail", "error", etc.
   - "Fail Date" → DATE (not ERROR_TYPE)
   - "Deploy Date" → DATE (not STATUS)
   - "Test Time" → DATE (not TEST_TIER)
+  - "Fail Days" → IGNORE (not ERROR_TYPE, it's a duration/metric)
 - **ODM vs CUSTOMER**: "odm" column (Original Design Manufacturer) → CUSTOMER only if it contains company names, not stage/tier values
 - Bilingual support (Chinese: 错误类型=ERROR_TYPE, 客户=CUSTOMER, 状态=STATUS, 日期=DATE)
 - File references (dump_file, log_path, *.tar.gz) = DIAGNOSTIC
@@ -317,6 +320,11 @@ Be intelligent about:
         # Date indicators (CHECK FIRST to avoid "Fail Date" being classified as ERROR_TYPE)
         if any(kw in col_lower for kw in ['date', 'time', '日期', 'timestamp', 'datecode']):
             return "DATE"
+        
+        # Metric/Duration columns (days, hours, counts) - BEFORE error type check
+        if any(kw in col_lower for kw in ['days', 'hours', 'minutes', 'count', 'qty', 'quantity', 
+                                           'duration', 'elapsed', 'age']):
+            return "IGNORE"
         
         # Test tier indicators (CHECK EARLY to prevent "Stage" from being classified as CUSTOMER)
         if any(kw in col_lower for kw in ['stage', 'l1', 'l2', 'l3', 'ate', 'slt', 'ceslt', 'osv', 
