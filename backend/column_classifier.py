@@ -177,6 +177,7 @@ Categories:
 - SERIAL_NUMBER: Serial numbers, barcodes, asset IDs, PPID, CPU_SN, 2D_barcode, System SN
 - ERROR_TYPE: Error types, failures, symptoms, issues, fault codes (错误类型, Failtype, Error, Symptom)
   ⚠️ IMPORTANT: If column contains "date" or "time", classify as DATE, NOT ERROR_TYPE (e.g., "Fail Date" → DATE)
+  ⚠️ IMPORTANT: Columns about failure location (failed core, failed CCD, failed die, failed DIMM) → DESCRIPTION, NOT ERROR_TYPE
 - STATUS: Status, state, resolution progress, FA status, RMA status (状态, FA状态)
 - TEST_TIER: Test stage names (L1, L2, ATE, SLT, CESLT, OSV, AFHC, FT1, FT2, Tier0-5, Stage, Phase)
   ⚠️ IMPORTANT: "Stage" columns (e.g., "Online Fail", "IDC Acceptance") are TEST_TIER, NOT CUSTOMER
@@ -186,8 +187,8 @@ Categories:
   ⚠️ IMPORTANT: Column name must indicate customer identity, not test stage or location
 - PLATFORM: Platform, BIOS, firmware versions, hardware config
 - DIAGNOSTIC: Log files, dump files, diagnostic paths, URLs, AFHC logs
-- DESCRIPTION: Comments, notes, observations, debug notes, summaries
-- IGNORE: Irrelevant, empty, or redundant columns (Location, Site, etc.)
+- DESCRIPTION: Comments, notes, observations, debug notes, summaries, failure location details (failed core/CCD/die)
+- IGNORE: Irrelevant, empty, or redundant columns (Location, Site, numeric IDs, etc.)
 
 Column headers to classify:
 {column_list}{sample_section}
@@ -232,6 +233,7 @@ Respond with a JSON object containing:
 }}
 
 Be intelligent about:
+- **FAILURE LOCATION vs ERROR TYPE**: Columns about WHERE the failure occurred (failed core, failed CCD, failed die, failed DIMM, core#, socket#) → DESCRIPTION, not ERROR_TYPE
 - **STAGE/PHASE PRIORITY**: Columns named "Stage", "Phase", or containing test stage values (e.g., "Online Fail", "IDC Acceptance") are TEST_TIER, NEVER CUSTOMER
 - **DATE PRIORITY**: Columns with "date", "time", or "timestamp" are ALWAYS DATE category, even if they also contain "fail", "error", etc.
   - "Fail Date" → DATE (not ERROR_TYPE)
@@ -242,7 +244,7 @@ Be intelligent about:
 - File references (dump_file, log_path, *.tar.gz) = DIAGNOSTIC
 - URLs (SharePoint, http://) = DIAGNOSTIC
 - Test tiers (L1, L2, ATE case-insensitive) = TEST_TIER
-- Synonyms (Error/Failure/Issue/Symptom all = ERROR_TYPE)
+- Synonyms (Error/Failure/Issue/Symptom all = ERROR_TYPE, but NOT if combined with location words like "core", "CCD", "die")
 - **Serial numbers can be in ANY column, not just ones named "Serial" or "SN"**
 - **Look at the ACTUAL DATA in sample rows, not just column names!**
 """
@@ -324,6 +326,9 @@ Be intelligent about:
         # Error type indicators (now won't match "Fail Date" since dates are already handled)
         if any(kw in col_lower for kw in ['error', 'fail', 'symptom', 'issue', 'problem', 
                                            '错误', '故障', 'fault', 'failtype', 'failure']):
+            # Exclude columns that are about failure location/context, not error types
+            if any(kw in col_lower for kw in ['core', 'ccd', 'socket', 'die', 'dimm', 'channel', 'rank']):
+                return "DESCRIPTION"  # Failed core/CCD location, not error type
             # Check if it's a diagnostic file
             if any(kw in col_lower for kw in ['dump', 'log', 'file', 'path', '.tar', '.gz', 'afhc']):
                 return "DIAGNOSTIC"
