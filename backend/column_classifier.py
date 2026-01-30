@@ -176,14 +176,18 @@ Classify each of these Excel column headers into ONE category:
 Categories:
 - SERIAL_NUMBER: Serial numbers, barcodes, asset IDs, PPID, CPU_SN, 2D_barcode, System SN
 - ERROR_TYPE: Error types, failures, symptoms, issues, fault codes (错误类型, Failtype, Error, Symptom)
+  ⚠️ IMPORTANT: If column contains "date" or "time", classify as DATE, NOT ERROR_TYPE (e.g., "Fail Date" → DATE)
 - STATUS: Status, state, resolution progress, FA status, RMA status (状态, FA状态)
-- TEST_TIER: Test stage names (L1, L2, ATE, SLT, CESLT, OSV, AFHC, FT1, FT2, Tier0-5)
-- DATE: Dates, timestamps, date codes (日期, Fail Date, Deploy Date)
-- CUSTOMER: Customer names, client info (客户, Customer, Client)
+- TEST_TIER: Test stage names (L1, L2, ATE, SLT, CESLT, OSV, AFHC, FT1, FT2, Tier0-5, Stage, Phase)
+  ⚠️ IMPORTANT: "Stage" columns (e.g., "Online Fail", "IDC Acceptance") are TEST_TIER, NOT CUSTOMER
+- DATE: Dates, timestamps, date codes (日期, Fail Date, Deploy Date, Test Date)
+  ⚠️ PRIORITY: Any column with "date" or "time" in name should be classified as DATE
+- CUSTOMER: Customer names, client info (客户, Customer, Client, end_customer, ODM - but NOT stage/phase values)
+  ⚠️ IMPORTANT: Column name must indicate customer identity, not test stage or location
 - PLATFORM: Platform, BIOS, firmware versions, hardware config
 - DIAGNOSTIC: Log files, dump files, diagnostic paths, URLs, AFHC logs
 - DESCRIPTION: Comments, notes, observations, debug notes, summaries
-- IGNORE: Irrelevant, empty, or redundant columns
+- IGNORE: Irrelevant, empty, or redundant columns (Location, Site, etc.)
 
 Column headers to classify:
 {column_list}{sample_section}
@@ -228,6 +232,12 @@ Respond with a JSON object containing:
 }}
 
 Be intelligent about:
+- **STAGE/PHASE PRIORITY**: Columns named "Stage", "Phase", or containing test stage values (e.g., "Online Fail", "IDC Acceptance") are TEST_TIER, NEVER CUSTOMER
+- **DATE PRIORITY**: Columns with "date", "time", or "timestamp" are ALWAYS DATE category, even if they also contain "fail", "error", etc.
+  - "Fail Date" → DATE (not ERROR_TYPE)
+  - "Deploy Date" → DATE (not STATUS)
+  - "Test Time" → DATE (not TEST_TIER)
+- **ODM vs CUSTOMER**: "odm" column (Original Design Manufacturer) → CUSTOMER only if it contains company names, not stage/tier values
 - Bilingual support (Chinese: 错误类型=ERROR_TYPE, 客户=CUSTOMER, 状态=STATUS, 日期=DATE)
 - File references (dump_file, log_path, *.tar.gz) = DIAGNOSTIC
 - URLs (SharePoint, http://) = DIAGNOSTIC
@@ -302,9 +312,18 @@ Be intelligent about:
                                            'sn', 'barcode', 'ppid', 'system_sn', 'rma#', 'asset']):
             return "SERIAL_NUMBER"
         
-        # Error type indicators
+        # Date indicators (CHECK FIRST to avoid "Fail Date" being classified as ERROR_TYPE)
+        if any(kw in col_lower for kw in ['date', 'time', '日期', 'timestamp', 'datecode']):
+            return "DATE"
+        
+        # Test tier indicators (CHECK EARLY to prevent "Stage" from being classified as CUSTOMER)
+        if any(kw in col_lower for kw in ['stage', 'l1', 'l2', 'l3', 'ate', 'slt', 'ceslt', 'osv', 
+                                           'afhc', 'ft1', 'ft2', 'fs1', 'fs2', 'tier', 'phase']):
+            return "TEST_TIER"
+        
+        # Error type indicators (now won't match "Fail Date" since dates are already handled)
         if any(kw in col_lower for kw in ['error', 'fail', 'symptom', 'issue', 'problem', 
-                                           '错误', '故障', 'fault']):
+                                           '错误', '故障', 'fault', 'failtype', 'failure']):
             # Check if it's a diagnostic file
             if any(kw in col_lower for kw in ['dump', 'log', 'file', 'path', '.tar', '.gz', 'afhc']):
                 return "DIAGNOSTIC"
@@ -314,16 +333,6 @@ Be intelligent about:
         if any(kw in col_lower for kw in ['status', 'state', '状态', 'fa_status', 'fa status', 
                                            'rma status', 'resolution']):
             return "STATUS"
-        
-        # Test tier indicators
-        if any(kw in col_lower for kw in ['l1', 'l2', 'l3', 'ate', 'slt', 'ceslt', 'osv', 
-                                           'afhc', 'ft1', 'ft2', 'fs1', 'fs2', 'tier']):
-            return "TEST_TIER"
-        
-        # Date indicators
-        if any(kw in col_lower for kw in ['date', 'time', '日期', 'deploy', 'fail_date', 
-                                           'datecode', 'timestamp']):
-            return "DATE"
         
         # Customer indicators
         if any(kw in col_lower for kw in ['customer', 'client', '客户', 'cust', 'end_customer']):
