@@ -20,7 +20,7 @@ from pydantic import BaseModel
 
 from models import Asset
 from database import get_session, init_db
-from parser import parse_excel, normalize_column_name
+from parser import parse_excel, normalize_column_name, is_valid_customer_value
 from pptx_parser import parse_pptx
 from nabu_client import get_nabu_client
 from code_sandbox import get_sandbox
@@ -347,20 +347,68 @@ async def get_asset(
             status_code=404,
             detail=f"Asset with serial number '{serial_number}' not found"
         )
+
+
+def _extract_customer_from_raw_data(raw_data: Optional[Dict]) -> Optional[str]:
+    """Extract and validate customer from raw_data.
+    
+    Prevents error types, test stages, and other non-customer values
+    from being incorrectly used as customer names.
+    
+    Args:
+        raw_data: The raw_data dictionary from an asset
+        
+    Returns:
+        Validated customer name or None
+    """
+    if not raw_data:
+        return None
+    
+    # Try direct Customer field first
+    customer_value = raw_data.get('Customer')
+    if customer_value and is_valid_customer_value(str(customer_value)):
+        return str(customer_value).strip()
+    
+    # Try CUSTOMER-classified columns
+    column_classification = raw_data.get('_column_classification', {})
+    for col, category in column_classification.items():
+        if category == 'CUSTOMER' and col in raw_data:
+            customer_value = raw_data.get(col)
+            if customer_value and is_valid_customer_value(str(customer_value)):
+                return str(customer_value).strip()
+    
+    return None
+
+
+@app.get("/assets/{serial_number}", response_model=AssetResponse)
+async def get_asset_by_serial(serial_number: str, session: AsyncSession = Depends(get_session)):
+    """
+    Get asset information by serial number.
+    
+    Returns the normalized asset data along with the complete raw JSON
+    from the original Excel row for verification.
+    
+    Args:
+        serial_number: The serial number to search for
+        session: Database session
+        
+    Returns:
+        AssetResponse with complete asset details including raw_data
+    """
+    stmt = select(Asset).where(Asset.serial_number == serial_number)
+    result = await session.execute(stmt)
+    asset = result.scalar_one_or_none()
+    
+    if not asset:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Asset with serial number '{serial_number}' not found"
+        )
     
     # Extract customer and tier
-    customer = None
+    customer = _extract_customer_from_raw_data(asset.raw_data)
     tier = None
     if asset.raw_data:
-        customer = asset.raw_data.get('Customer')
-        if not customer:
-            column_classification = asset.raw_data.get('_column_classification', {})
-            for col, category in column_classification.items():
-                if category == 'CUSTOMER' and col in asset.raw_data:
-                    customer = asset.raw_data.get(col)
-                    if customer:
-                        break
-        
         column_classification = asset.raw_data.get('_column_classification', {})
         tier_values = []
         for col, category in column_classification.items():
@@ -1168,14 +1216,23 @@ async def _get_dataframe(
         # Extract customer from raw_data
         customer = None
         if asset.raw_data:
-            customer = asset.raw_data.get('Customer')
+            # Try direct Customer field first
+            customer_value = asset.raw_data.get('Customer')
+            if customer_value and is_valid_customer_value(str(customer_value)):
+                customer = str(customer_value).strip()
+            
+            # If not found, try CUSTOMER-classified columns
             if not customer:
                 column_classification = asset.raw_data.get('_column_classification', {})
                 for col, category in column_classification.items():
                     if category == 'CUSTOMER' and col in asset.raw_data:
-                        customer = asset.raw_data.get(col)
-                        if customer:
-                            break
+                        customer_value = asset.raw_data.get(col)
+                        if customer_value:
+                            customer_str = str(customer_value).strip()
+                            # Validate it's actually a customer name, not an error type
+                            if is_valid_customer_value(customer_str):
+                                customer = customer_str
+                                break
         
         # Extract tier from TEST_TIER columns
         tier = None

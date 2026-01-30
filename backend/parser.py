@@ -20,19 +20,19 @@ from column_classifier import ColumnClassifier, clean_error_type_with_nabu
 
 # AMD CPU Serial Number Pattern Validator
 # Pattern with anchors for exact validation - strict format
-AMD_CPU_SERIAL_PATTERN = re.compile(r'^9[A-Z0-9]{11}_\d{3}-\d{12}$')
+AMD_CPU_SERIAL_PATTERN = re.compile(r'^[0-9][A-Z0-9]{11}_\d{3}-\d{12}$')
 # Pattern without anchors for searching within text - flexible to match variations
-# Matches: 9XXX... patterns (at least 9 alphanumeric chars after the 9)
-# Examples: 9MT8017P50008_100-000001463, 9AH0242W50010_100-000001, 9AR0841T50008
-AMD_CPU_SERIAL_SEARCH_PATTERN = re.compile(r'9[A-Z0-9]{9,}(?:_\d{3}(?:-\d{1,12})?)?')
+# Matches: [0-9]XXX... patterns (at least 9 alphanumeric chars after the first digit)
+# Examples: 9MT8017P50008_100-000001463, 2ABS784R50042_100-000001359, 9AH0242W50010_100-000001
+AMD_CPU_SERIAL_SEARCH_PATTERN = re.compile(r'[0-9][A-Z0-9]{9,}(?:_\d{3}(?:-\d{1,12})?)?')
 
 def is_valid_amd_cpu_serial(serial: str) -> bool:
     """Validate if a string matches AMD CPU serial number format.
     
     Flexible format to handle variations:
-    - Full: 9[A-Z0-9]{11}_[0-9]{3}-[0-9]{12}
-    - Partial: 9[A-Z0-9]{9+} (at least 9 alphanumeric chars after the 9)
-    Examples: 9MT8017P50008_100-000001463, 9AH0242W50010_100-000001, 9AR0841T50008
+    - Full: [0-9][A-Z0-9]{11}_[0-9]{3}-[0-9]{12}
+    - Partial: [0-9][A-Z0-9]{9+} (at least 9 alphanumeric chars after the first digit)
+    Examples: 9MT8017P50008_100-000001463, 2ABS784R50042_100-000001359, 9AH0242W50010_100-000001
     
     Returns:
         True if valid AMD CPU serial, False otherwise
@@ -40,8 +40,8 @@ def is_valid_amd_cpu_serial(serial: str) -> bool:
     if not serial or not isinstance(serial, str):
         return False
     serial = serial.strip()
-    # Accept flexible AMD serial format: starts with 9, at least 9 more alphanumeric chars
-    flexible_pattern = re.compile(r'^9[A-Z0-9]{9,}')
+    # Accept flexible AMD serial format: starts with digit, at least 9 more alphanumeric chars
+    flexible_pattern = re.compile(r'^[0-9][A-Z0-9]{9,}')
     return flexible_pattern.match(serial) is not None
 
 def is_legend_or_reference_row(serial: str) -> bool:
@@ -88,6 +88,12 @@ def is_valid_customer_value(customer: str) -> bool:
         'ATE', 'SLT', 'OSV', 'CESLT', 'L1', 'L2', 'FT1', 'FT2',
         # Common placeholder text
         'TEST', 'DEBUG', 'SAMPLE', 'INTERNAL', 'DEMO',
+        # ODM/OEM names (these are manufacturers, not end customers)
+        'HUAQIN', 'WISTRON', 'FOXCONN', 'QUANTA', 'COMPAL', 'INVENTEC', 
+        'PEGATRON', 'FLEX', 'JABIL', 'CELESTICA', 'SUPER MICRO', 'SUPERMICRO',
+        # AMD Platform/CPU names (these are product names, not customers)
+        'TURIN', 'GENOA', 'BERGAMO', 'SIENA', 'MILAN', 'ROME', 'NAPLES',
+        'EPYC', 'RYZEN', 'THREADRIPPER', 'ZEN',
     ]
     
     # Check if customer value contains any non-customer patterns
