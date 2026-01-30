@@ -50,51 +50,124 @@ class ColumnClassifier:
         else:
             self.nabu_client = NabuClient(api_token=api_token)
     
-    async def classify_columns(self, columns: List[str]) -> Dict[str, str]:
+    async def classify_columns(self, columns: List[str], sample_data: Optional[Dict[str, List[Any]]] = None) -> Dict[str, Any]:
         """
-        Classify a list of column headers using Nabu AI.
+        Classify a list of column headers using Nabu AI and detect serial number column.
         
         Args:
             columns: List of column header names from Excel
+            sample_data: Optional dict mapping column names to first 3-5 sample values
             
         Returns:
-            Dictionary mapping column names to categories
-            Example: {"CPU_SN": "SERIAL_NUMBER", "错误类型": "ERROR_TYPE", ...}
+            Dictionary with:
+            - 'classifications': Dict mapping column names to categories
+            - 'serial_number_column': Name of the column containing serial numbers
+            - 'error_extraction_column': Column to extract error info from (if different from main error column)
+            Example: {
+                "classifications": {"CPU_SN": "SERIAL_NUMBER", "错误类型": "ERROR_TYPE"},
+                "serial_number_column": "Summary",
+                "error_extraction_column": "Summary"
+            }
         """
         if not columns:
-            return {}
+            return {"classifications": {}, "serial_number_column": None, "error_extraction_column": None}
         
         # If Nabu not available, use fallback
         if not self.nabu_client:
-            return self._fallback_classification(columns)
+            fallback = self._fallback_classification(columns)
+            return {
+                "classifications": fallback,
+                "serial_number_column": None,
+                "error_extraction_column": None
+            }
         
         # Prepare prompt for Nabu
-        prompt = self._build_classification_prompt(columns)
+        prompt = self._build_classification_prompt(columns, sample_data)
         
         try:
             # Call Nabu AI for classification
+            print(f"\n🤖 Sending to Nabu AI:")
+            print(f"  - Columns to classify: {len(columns)}")
+            # Handle both old dict format and new list format
+            if isinstance(sample_data, list):
+                print(f"  - Sample data provided: {len(sample_data)} complete rows")
+            elif isinstance(sample_data, dict):
+                print(f"  - Sample data provided: {len(sample_data)} columns")
+            else:
+                print(f"  - Sample data provided: 0")
+            
+            if sample_data and isinstance(sample_data, list) and len(sample_data) > 0:
+                # Show first sample row
+                first_row = sample_data[0]
+                print(f"  - First sample row has {len(first_row)} columns")
+            
             response_dict = await self.nabu_client.chat(
                 user_prompt=prompt,
                 history=[]
             )
             
             # Extract text response from dict
-            response_text = response_dict.get('response', '') if isinstance(response_dict, dict) else str(response_dict)
+            # Nabu returns response in 'responseText' field
+            response_text = response_dict.get('responseText', '') if isinstance(response_dict, dict) else str(response_dict)
             
-            # Parse Nabu's response to extract classifications
-            classification = self._parse_nabu_response(response_text, columns)
+            print(f"\n📥 Nabu AI Response (first 500 chars):")
+            print(f"{response_text[:500]}...")
             
-            print(f"✓ Nabu classified {len(classification)} columns")
-            return classification
+            # Parse Nabu's response to extract classifications and serial column
+            result = self._parse_nabu_response(response_text, columns)
+            
+            print(f"\n✅ Nabu Classification Results:")
+            print(f"  ✓ Classified {len(result['classifications'])} columns")
+            if result['serial_number_column']:
+                print(f"  ✓ Serial column identified: '{result['serial_number_column']}'")
+            else:
+                print(f"  ⚠ No serial column identified by AI")
+            if result['error_extraction_column']:
+                print(f"  ✓ Error extraction column: '{result['error_extraction_column']}'")
+            
+            return result
             
         except Exception as e:
             print(f"Warning: Nabu classification failed: {str(e)}. Using fallback.")
-            return self._fallback_classification(columns)
+            fallback = self._fallback_classification(columns)
+            return {
+                "classifications": fallback,
+                "serial_number_column": None,
+                "error_extraction_column": None
+            }
     
-    def _build_classification_prompt(self, columns: List[str]) -> str:
-        """Build the prompt for Nabu AI column classification."""
+    def _build_classification_prompt(self, columns: List[str], sample_data: Optional[Any] = None) -> str:
+        """Build the prompt for Nabu AI column classification and serial number detection.
+        
+        Args:
+            columns: List of column names
+            sample_data: Either Dict[str, List] (old format) or List[Dict] (new format of complete rows)
+        """
         
         column_list = "\n".join([f"{i+1}. {col}" for i, col in enumerate(columns)])
+        
+        # Add sample data - handle both old format (per-column) and new format (complete rows)
+        sample_section = ""
+        if sample_data:
+            if isinstance(sample_data, list) and len(sample_data) > 0 and isinstance(sample_data[0], dict):
+                # New format: List of complete row dictionaries
+                sample_section = "\n\n**COMPLETE SAMPLE ROWS** (showing all columns side-by-side):\n"
+                sample_section += "This is REAL data from the file. Compare columns to find AMD CPU serials.\n\n"
+                
+                for idx, row_dict in enumerate(sample_data[:3], 1):  # Show up to 3 complete rows
+                    sample_section += f"Row {idx}:\n"
+                    for col, val in row_dict.items():
+                        display_val = str(val)[:150]
+                        sample_section += f"  {col}: {display_val}\n"
+                    sample_section += "\n"
+            else:
+                # Old format: Dict mapping column names to sample values
+                sample_section = "\n\nSample data from columns:\n"
+                sample_items = list(sample_data.items())[:10] if isinstance(sample_data, dict) else []
+                for col, values in sample_items:
+                    sample_values = [str(v)[:100] for v in (values[:3] if isinstance(values, list) else [values]) if v]
+                    if sample_values:
+                        sample_section += f"  {col}: {', '.join(sample_values)}\n"
         
         prompt = f"""You are an expert data analyst classifying hardware failure tracking columns.
 
@@ -113,12 +186,45 @@ Categories:
 - IGNORE: Irrelevant, empty, or redundant columns
 
 Column headers to classify:
-{column_list}
+{column_list}{sample_section}
 
-Respond with ONLY a JSON object mapping each column to its category:
+**CRITICAL TASK: Identify the Serial Number Column**
+
+**A good AMD CPU serial number looks like this:**
+`9MP2379P50008_100-000001463`
+
+Pattern characteristics:
+- Starts with "9"
+- Followed by 11+ alphanumeric characters
+- May have underscore and numbers (e.g., _100-000001463)
+- Examples: 9MT8017P50008_100-000001463, 9AH0242W50010_100-000001, 9AR0841T50008
+
+IMPORTANT: Look at the sample rows above. The serial number might be:
+- In a dedicated column (like "PPID" or "CPU_SN")
+- Mixed with other text in a column like "Summary" (e.g., "9MP2379P50008_100-000001463 SLT coverage patch")
+
+**Compare ALL columns in the sample rows:**
+- Which column has values that START with "9" followed by many alphanumeric characters?
+- Which column has values like "FARM-####" or "GOLD" (NOT serials - these are tracking IDs)?
+- The serial column might contain multiple words - look for the word that matches the pattern above
+
+**The column with AMD CPU serials is the SERIAL_NUMBER column, not FARM/tracking IDs!**
+
+**SECONDARY TASK: Error Extraction**
+If the serial number column ALSO contains error descriptions (e.g., "9AMP...463 Bios x225 then fail"), identify this column for error extraction.
+
+Respond with a JSON object containing:
+1. "classifications": mapping each column to its category
+2. "serial_number_column": the EXACT column name that contains AMD CPU serial numbers (null if none found)
+3. "error_extraction_column": the column name to extract error descriptions from (null if none, can be same as serial_number_column)
+
 {{
-  "column_name": "CATEGORY",
-  ...
+  "classifications": {{
+    "column_name": "CATEGORY",
+    ...
+  }},
+  "serial_number_column": "Summary",
+  "error_extraction_column": "Summary"
 }}
 
 Be intelligent about:
@@ -127,14 +233,22 @@ Be intelligent about:
 - URLs (SharePoint, http://) = DIAGNOSTIC
 - Test tiers (L1, L2, ATE case-insensitive) = TEST_TIER
 - Synonyms (Error/Failure/Issue/Symptom all = ERROR_TYPE)
+- **Serial numbers can be in ANY column, not just ones named "Serial" or "SN"**
+- **Look at the ACTUAL DATA in sample rows, not just column names!**
 """
         
         return prompt
     
-    def _parse_nabu_response(self, response: str, columns: List[str]) -> Dict[str, str]:
-        """Parse Nabu's response to extract column classifications."""
+    def _parse_nabu_response(self, response: str, columns: List[str]) -> Dict[str, Any]:
+        """Parse Nabu's response to extract column classifications and serial number column."""
         import json
         import re
+        
+        result = {
+            "classifications": {},
+            "serial_number_column": None,
+            "error_extraction_column": None
+        }
         
         # Try to extract JSON from response
         try:
@@ -142,23 +256,33 @@ Be intelligent about:
             json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', response, re.DOTALL)
             if json_match:
                 json_str = json_match.group(0)
-                classification = json.loads(json_str)
+                nabu_result = json.loads(json_str)
+                
+                # Extract classifications
+                classifications = nabu_result.get('classifications', nabu_result)
                 
                 # Validate categories
                 validated = {}
-                for col, category in classification.items():
+                for col, category in classifications.items():
+                    if col in ['serial_number_column', 'error_extraction_column']:
+                        continue  # Skip metadata fields
                     if category.upper() in self.CATEGORIES:
                         validated[col] = category.upper()
                     else:
                         # Invalid category, use fallback for this column
                         validated[col] = self._classify_single_column(col)
                 
-                return validated
+                result["classifications"] = validated
+                result["serial_number_column"] = nabu_result.get('serial_number_column')
+                result["error_extraction_column"] = nabu_result.get('error_extraction_column')
+                
+                return result
         except Exception as e:
             print(f"Warning: Failed to parse Nabu response: {str(e)}")
         
         # If parsing failed, use fallback
-        return self._fallback_classification(columns)
+        result["classifications"] = self._fallback_classification(columns)
+        return result
     
     def _fallback_classification(self, columns: List[str]) -> Dict[str, str]:
         """Fallback classification using keyword matching."""

@@ -61,7 +61,10 @@ class AssetResponse(BaseModel):
     id: str
     serial_number: str
     error_type: Optional[str]
+    error_category: Optional[str]  # High-level categorization of error_type
     status: Optional[str]
+    customer: Optional[str]  # Extracted from raw_data for easier access
+    tier: Optional[str]  # Test tier (ATE, SLT, FT1, FT2, etc.) extracted from TEST_TIER columns
     ingest_timestamp: str
     source_filename: str
     raw_data: dict
@@ -104,13 +107,13 @@ async def upload_file(
     Upload and parse an Excel or PowerPoint file containing asset data.
     
     The endpoint:
-    1. Accepts .xlsx, .xls, .pptx files
+    1. Accepts .xlsx, .xls, .xlsb, .pptx files
     2. Intelligently detects serial number column/data
     3. Parses and normalizes data
     4. Performs upsert based on serial number (updates if exists, creates if new)
     
     Supported formats:
-    - Excel (.xlsx, .xls): Tables with serial numbers
+    - Excel (.xlsx, .xls, .xlsb): Tables with serial numbers
     - PowerPoint (.pptx): Native tables, text content, or image-based tables (OCR)
     
     Args:
@@ -121,10 +124,10 @@ async def upload_file(
         UploadResponse with processing statistics
     """
     # Validate file type
-    if not file.filename.endswith(('.xlsx', '.xls', '.pptx')):
+    if not file.filename.endswith(('.xlsx', '.xls', '.xlsb', '.pptx')):
         raise HTTPException(
             status_code=400,
-            detail="Only Excel files (.xlsx, .xls) and PowerPoint files (.pptx) are supported"
+            detail="Only Excel files (.xlsx, .xls, .xlsb) and PowerPoint files (.pptx) are supported"
         )
     
     # Save uploaded file temporarily
@@ -165,7 +168,7 @@ async def upload_file(
         
         # Parse the file based on type
         try:
-            if file_ext in ['.xlsx', '.xls']:
+            if file_ext in ['.xlsx', '.xls', '.xlsb']:
                 parsed_records = parse_excel(tmp_file_path, original_filename=file.filename)
             elif file_ext == '.pptx':
                 parsed_records = parse_pptx(tmp_file_path, original_filename=file.filename)
@@ -345,11 +348,40 @@ async def get_asset(
             detail=f"Asset with serial number '{serial_number}' not found"
         )
     
+    # Extract customer and tier
+    customer = None
+    tier = None
+    if asset.raw_data:
+        customer = asset.raw_data.get('Customer')
+        if not customer:
+            column_classification = asset.raw_data.get('_column_classification', {})
+            for col, category in column_classification.items():
+                if category == 'CUSTOMER' and col in asset.raw_data:
+                    customer = asset.raw_data.get(col)
+                    if customer:
+                        break
+        
+        column_classification = asset.raw_data.get('_column_classification', {})
+        tier_values = []
+        for col, category in column_classification.items():
+            if category == 'TEST_TIER' and col in asset.raw_data:
+                value = asset.raw_data.get(col)
+                if value and str(value).strip() not in ['', 'N/A', 'NA', 'None']:
+                    tier_values.append(str(value).strip())
+        if tier_values:
+            tier = ', '.join(tier_values)
+    
+    if not tier:
+        tier = "Not Specified"
+    
     return AssetResponse(
         id=str(asset.id),
         serial_number=asset.serial_number,
         error_type=asset.error_type,
+        error_category=_categorize_error(asset.error_type),
         status=asset.status,
+        customer=customer,
+        tier=tier,
         ingest_timestamp=asset.ingest_timestamp.isoformat(),
         source_filename=asset.source_filename,
         raw_data=asset.raw_data
@@ -400,18 +432,54 @@ async def search_assets(
     assets = result.scalars().all()
     
     # Convert to response models
-    asset_responses = [
-        AssetResponse(
-            id=str(asset.id),
-            serial_number=asset.serial_number,
-            error_type=asset.error_type,
-            status=asset.status,
-            ingest_timestamp=asset.ingest_timestamp.isoformat(),
-            source_filename=asset.source_filename,
-            raw_data=asset.raw_data
+    asset_responses = []
+    for asset in assets:
+        # Extract customer from raw_data
+        customer = None
+        if asset.raw_data:
+            customer = asset.raw_data.get('Customer')
+            if not customer:
+                column_classification = asset.raw_data.get('_column_classification', {})
+                for col, category in column_classification.items():
+                    if category == 'CUSTOMER' and col in asset.raw_data:
+                        customer = asset.raw_data.get(col)
+                        if customer:
+                            break
+        
+        # Extract tier from TEST_TIER columns
+        tier = None
+        if asset.raw_data:
+            column_classification = asset.raw_data.get('_column_classification', {})
+            # Collect all TEST_TIER column values
+            tier_values = []
+            for col, category in column_classification.items():
+                if category == 'TEST_TIER' and col in asset.raw_data:
+                    value = asset.raw_data.get(col)
+                    if value and str(value).strip() not in ['', 'N/A', 'NA', 'None']:
+                        tier_values.append(str(value).strip())
+            
+            # Join multiple tiers with comma
+            if tier_values:
+                tier = ', '.join(tier_values)
+        
+        # Default to "Not Specified" if no tier found
+        if not tier:
+            tier = "Not Specified"
+        
+        asset_responses.append(
+            AssetResponse(
+                id=str(asset.id),
+                serial_number=asset.serial_number,
+                error_type=asset.error_type,
+                error_category=_categorize_error(asset.error_type),
+                status=asset.status,
+                customer=customer,
+                tier=tier,
+                ingest_timestamp=asset.ingest_timestamp.isoformat(),
+                source_filename=asset.source_filename,
+                raw_data=asset.raw_data
+            )
         )
-        for asset in assets
-    ]
     
     return SearchResponse(
         total=len(asset_responses),
@@ -450,18 +518,54 @@ async def list_assets(
     assets = result.scalars().all()
     
     # Convert to response models
-    asset_responses = [
-        AssetResponse(
-            id=str(asset.id),
-            serial_number=asset.serial_number,
-            error_type=asset.error_type,
-            status=asset.status,
-            ingest_timestamp=asset.ingest_timestamp.isoformat(),
-            source_filename=asset.source_filename,
-            raw_data=asset.raw_data
+    asset_responses = []
+    for asset in assets:
+        # Extract customer from raw_data
+        customer = None
+        if asset.raw_data:
+            customer = asset.raw_data.get('Customer')
+            if not customer:
+                column_classification = asset.raw_data.get('_column_classification', {})
+                for col, category in column_classification.items():
+                    if category == 'CUSTOMER' and col in asset.raw_data:
+                        customer = asset.raw_data.get(col)
+                        if customer:
+                            break
+        
+        # Extract tier from TEST_TIER columns
+        tier = None
+        if asset.raw_data:
+            column_classification = asset.raw_data.get('_column_classification', {})
+            # Collect all TEST_TIER column values
+            tier_values = []
+            for col, category in column_classification.items():
+                if category == 'TEST_TIER' and col in asset.raw_data:
+                    value = asset.raw_data.get(col)
+                    if value and str(value).strip() not in ['', 'N/A', 'NA', 'None']:
+                        tier_values.append(str(value).strip())
+            
+            # Join multiple tiers with comma
+            if tier_values:
+                tier = ', '.join(tier_values)
+        
+        # Default to "Not Specified" if no tier found
+        if not tier:
+            tier = "Not Specified"
+        
+        asset_responses.append(
+            AssetResponse(
+                id=str(asset.id),
+                serial_number=asset.serial_number,
+                error_type=asset.error_type,
+                error_category=_categorize_error(asset.error_type),
+                status=asset.status,
+                customer=customer,
+                tier=tier,
+                ingest_timestamp=asset.ingest_timestamp.isoformat(),
+                source_filename=asset.source_filename,
+                raw_data=asset.raw_data
+            )
         )
-        for asset in assets
-    ]
     
     return SearchResponse(
         total=len(asset_responses),
@@ -631,8 +735,8 @@ COMPLETE DATA SUMMARY (ALL {data_context['total_assets']} RECORDS):
 📊 FULL STATISTICS FOR EVERY COLUMN:
 {json.dumps(data_context.get('complete_statistics', {}), indent=2)}
 
-🔢 ALL SERIAL NUMBERS ({len(data_context.get('all_serial_numbers', []))} total):
-{', '.join(data_context.get('all_serial_numbers', [])[:20])}{'...' if len(data_context.get('all_serial_numbers', [])) > 20 else ''}
+🔢 SERIAL NUMBER DIRECTORY (ALL {len(data_context.get('serial_lookup', {}))} assets with full details):
+{json.dumps(data_context.get('serial_lookup', {}), indent=2)}
 
 📈 CUSTOMER-ERROR MATRIX (ALL combinations):
 {json.dumps(data_context.get('customer_error_matrix', {}), indent=2)}
@@ -647,15 +751,20 @@ Available columns: {', '.join(data_context['columns'])}
 
 USER QUESTION: {request.message}
 
-IMPORTANT: You have COMPLETE statistics for all {data_context['total_assets']} records above. 
-Use the full statistics to provide accurate counts, lists, and insights. 
-For example:
-- "List all serial numbers" → Use all_serial_numbers list
+IMPORTANT: You have COMPLETE data access for all {data_context['total_assets']} records above. 
+The serial_lookup dictionary contains EVERY serial number with status, error_type, customer, and source file.
+To answer questions about specific serial numbers:
+1. Look up the serial number in serial_lookup dictionary
+2. Return the status, error_type, customer, and other details
+
+Use the full data to provide accurate responses. 
+Examples:
+- "What's the status of serial number 9MK7529X40025_100-000001651?" → Look it up in serial_lookup
 - "Which customer has most failures?" → Use complete_statistics['Customer']
 - "What error types exist?" → Use complete_statistics['error_type']
 - "How many failures per date?" → Use timeline
 
-Provide data-driven responses using the complete statistics."""
+Provide accurate, data-driven responses using the complete dataset."""
 
         # Call Nabu AI
         nabu = get_nabu_client(NABU_API_TOKEN)
@@ -876,8 +985,31 @@ async def _get_data_context(
         if values:
             stats[col] = dict(sorted(values.items(), key=lambda x: x[1], reverse=True))
     
-    # Get ALL serial numbers (small dataset, we can afford this)
+    # Get ALL serial numbers with their key attributes (small dataset, affordable)
     all_serials = [asset.serial_number for asset in assets if asset.serial_number]
+    
+    # Create serial number to asset info mapping for direct lookup
+    serial_lookup = {}
+    for asset in assets:
+        if asset.serial_number:
+            # Extract customer
+            customer = None
+            if asset.raw_data:
+                customer = asset.raw_data.get('Customer')
+                if not customer:
+                    column_classification = asset.raw_data.get('_column_classification', {})
+                    for col, category in column_classification.items():
+                        if category == 'CUSTOMER' and col in asset.raw_data:
+                            customer = asset.raw_data.get(col)
+                            if customer:
+                                break
+            
+            serial_lookup[asset.serial_number] = {
+                'status': asset.status,
+                'error_type': asset.error_type,
+                'customer': customer,
+                'source_filename': asset.source_filename
+            }
     
     # Cross-tabulation: Customer x Error Type
     customer_errors = {}
@@ -925,12 +1057,92 @@ async def _get_data_context(
         'total_assets': len(assets),
         'unique_customers': len(stats.get('Customer', {})),
         'all_serial_numbers': all_serials,  # Complete list for small datasets
+        'serial_lookup': serial_lookup,  # Map serial number to key attributes
         'complete_statistics': stats,  # Value counts for ALL records in each column
         'customer_error_matrix': customer_errors,  # Customer x Error cross-tab
         'timeline': dict(sorted(failures_by_date.items())),  # Failures over time
         'columns': sorted(list(all_columns)),
         'sample': sample  # Representative samples for context
     }
+
+
+def _categorize_error(error_type: str) -> str:
+    """Categorize granular error types into higher-level categories"""
+    if not error_type or error_type.strip() == '':
+        return 'Unknown'
+    
+    error_lower = str(error_type).lower().strip()
+    
+    # Parity Errors
+    if 'parity' in error_lower or 'prt_err' in error_lower:
+        return 'Parity Error'
+    
+    # ECC Errors
+    if 'ecc' in error_lower:
+        return 'ECC Error'
+    
+    # Cache Errors (L2, L3)
+    if any(x in error_lower for x in ['l2', 'l3', 'cache']):
+        return 'Cache Error'
+    
+    # Memory Errors
+    if any(x in error_lower for x in ['memory', 'dimm', 'dram', 'mem']):
+        return 'Memory Error'
+    
+    # Load-Store Unit Errors
+    if error_lower.startswith('ls') or 'load-store' in error_lower:
+        return 'Load-Store Error'
+    
+    # Floating Point Errors
+    if error_lower.startswith('fp') or 'floating point' in error_lower or 'fp_' in error_lower:
+        return 'Floating Point Error'
+    
+    # Integer Execution Errors
+    if error_lower.startswith('ex') or error_lower == 'de' or 'execution' in error_lower:
+        return 'Execution Unit Error'
+    
+    # Coherent Slave/Master Errors
+    if error_lower.startswith('cs') or error_lower.startswith('if') or 'coherent' in error_lower:
+        return 'Coherent Error'
+    
+    # GMI (Global Memory Interconnect) Errors
+    if 'gmi' in error_lower or 'interconnect' in error_lower:
+        return 'Interconnect Error'
+    
+    # Test Program Errors
+    if any(x in error_lower for x in ['afhc', 'memtester', 'stressng', 'avt', 'bist', 'hdrt']):
+        return 'Test Program'
+    
+    # System/Application Errors
+    if any(x in error_lower for x in ['online', 'app', 'application', 'crash', 'hang', 'boot', 'reboot']):
+        return 'System/Application Error'
+    
+    # Power/Thermal Errors
+    if any(x in error_lower for x in ['power', 'thermal', 'temp', 'voltage', 'ac/dc', 'cycle']):
+        return 'Power/Thermal Error'
+    
+    # PCIe Errors
+    if 'pcie' in error_lower or 'pci' in error_lower:
+        return 'PCIe Error'
+    
+    # BMC Errors
+    if 'bmc' in error_lower:
+        return 'BMC Error'
+    
+    # Watchdog Timer Errors
+    if 'wdt' in error_lower or 'watchdog' in error_lower:
+        return 'Watchdog Error'
+    
+    # Health Check / Diagnostic Errors
+    if any(x in error_lower for x in ['health', 'diagnostic', 'check']):
+        return 'Health Check'
+    
+    # Core/CPU Specific Errors
+    if 'core' in error_lower or 'cpu' in error_lower:
+        return 'Core/CPU Error'
+    
+    # Unknown/Other
+    return 'Other'
 
 
 async def _get_dataframe(
@@ -953,16 +1165,57 @@ async def _get_dataframe(
     # Convert to list of dicts
     data = []
     for asset in assets:
+        # Extract customer from raw_data
+        customer = None
+        if asset.raw_data:
+            customer = asset.raw_data.get('Customer')
+            if not customer:
+                column_classification = asset.raw_data.get('_column_classification', {})
+                for col, category in column_classification.items():
+                    if category == 'CUSTOMER' and col in asset.raw_data:
+                        customer = asset.raw_data.get(col)
+                        if customer:
+                            break
+        
+        # Extract tier from TEST_TIER columns
+        tier = None
+        if asset.raw_data:
+            column_classification = asset.raw_data.get('_column_classification', {})
+            tier_values = []
+            for col, category in column_classification.items():
+                if category == 'TEST_TIER' and col in asset.raw_data:
+                    value = asset.raw_data.get(col)
+                    if value and str(value).strip() not in ['', 'N/A', 'NA', 'None']:
+                        tier_values.append(str(value).strip())
+            if tier_values:
+                tier = ', '.join(tier_values)
+        
+        # Default to "Not Specified" if no tier found
+        if not tier:
+            tier = "Not Specified"
+        
+        # Categorize error type
+        error_category = _categorize_error(asset.error_type)
+        
         row = {
             'id': str(asset.id),
             'serial_number': asset.serial_number,
             'error_type': asset.error_type,
+            'error_category': error_category,
             'status': asset.status,
+            'customer': customer,
+            'tier': tier,
             'source_filename': asset.source_filename,
             'ingest_timestamp': asset.ingest_timestamp
         }
         if asset.raw_data:
-            row.update(asset.raw_data)
+            # Convert raw_data values to strings if they're lists/dicts
+            # This prevents "unhashable type" errors in pandas operations
+            for key, value in asset.raw_data.items():
+                if isinstance(value, (list, dict)):
+                    row[key] = str(value)
+                else:
+                    row[key] = value
         data.append(row)
     
     return pd.DataFrame(data)

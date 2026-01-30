@@ -735,6 +735,7 @@ if 'page' not in st.session_state:
 # Main App Header
 st.markdown('<div class="main-header">🔍 Silicon Trace v3.0</div>', unsafe_allow_html=True)
 st.markdown("**Hardware Failure Analysis Dashboard** - Real-time insights and analytics")
+st.markdown("*If you have questions, concerns or feedback, please reach out to AJ Dahal (ajayad@amd.com)*")
 
 # Sidebar Navigation
 with st.sidebar:
@@ -815,18 +816,70 @@ if st.session_state.page == "Dashboard":
             key_cols = get_key_columns(asset)
             raw_data = asset.get('raw_data', {})
             
-            # Extract customer first
-            customer_keywords = ['customer', 'client', 'end_customer', 'end customer', 
-                               'customer_name', 'customer name', '客户', 'cust']
+            # Extract customer - use AI classification if available
             customer_found = False
             customer_name = 'Unknown'
-            for key, value in raw_data.items():
-                if not key.startswith('_') and value and any(kw in key.lower() for kw in customer_keywords):
+            
+            # First, check if we have column classification metadata (v3.2+)
+            column_classification = raw_data.get('_column_classification', {})
+            
+            # Debug logging for first 5 assets
+            if len(customer_counts) < 5:
+                print(f"\n🔍 DEBUG Asset {asset.get('serial_number', 'unknown')}:")
+                print(f"  Has classification: {bool(column_classification)}")
+                if column_classification:
+                    customer_cols = [col for col, cat in column_classification.items() if cat == 'CUSTOMER']
+                    print(f"  Customer columns from classification: {customer_cols}")
+            
+            # If we have classification data, use it
+            if column_classification:
+                for col, category in column_classification.items():
+                    if category == 'CUSTOMER' and col in raw_data:
+                        value = raw_data.get(col)
+                        if value:
+                            customer_name = str(value).strip().upper()
+                            
+                            # Debug log
+                            if len(customer_counts) < 5:
+                                print(f"  Using classified CUSTOMER column: '{col}' = '{customer_name}'")
+                            
+                            if customer_name and customer_name not in ['N/A', 'NA', 'NONE', '']:
+                                customer_counts[customer_name] += 1
+                                customer_found = True
+                                break
+            
+            # If not found via classification, check for standard "Customer" field (added by parser)
+            if not customer_found and 'Customer' in raw_data:
+                value = raw_data.get('Customer')
+                if value:
                     customer_name = str(value).strip().upper()
+                    
+                    if len(customer_counts) < 5:
+                        print(f"  Using standard 'Customer' field: '{customer_name}'")
+                    
                     if customer_name and customer_name not in ['N/A', 'NA', 'NONE', '']:
                         customer_counts[customer_name] += 1
                         customer_found = True
-                        break
+            
+            # Last fallback: keyword search for older data without classification
+            if not customer_found:
+                customer_keywords = ['customer', 'client', 'end_customer', 'end customer', 
+                                   'customer_name', 'customer name', '客户']
+                
+                for key, value in raw_data.items():
+                    if not key.startswith('_') and value:
+                        # Exact match or starts with keyword (avoid false positives)
+                        if any(key.lower() == kw or key.lower().startswith(kw + ' ') or key.lower().startswith(kw + '_') 
+                               for kw in customer_keywords):
+                            customer_name = str(value).strip().upper()
+                            
+                            if len(customer_counts) < 5:
+                                print(f"  Using keyword-matched customer column: '{key}' = '{customer_name}'")
+                            
+                            if customer_name and customer_name not in ['N/A', 'NA', 'NONE', '']:
+                                customer_counts[customer_name] += 1
+                                customer_found = True
+                                break
             
             if not customer_found:
                 customer_counts['Unknown'] += 1
@@ -1232,13 +1285,13 @@ if st.session_state.page == "Dashboard":
 elif st.session_state.page == "Ingest":
     # ==================== INGEST DATA PAGE ====================
     st.markdown("## 📤 Ingest Data")
-    st.markdown("Upload Excel or PowerPoint files containing hardware asset data. The system will automatically detect serial numbers.")
+    st.markdown("Upload Excel or PowerPoint files containing hardware asset data. Supports .xlsx, .xls, .xlsb (binary), and .pptx files. The system will automatically detect serial numbers.")
     
     uploaded_files = st.file_uploader(
         "Choose file(s)",
-        type=["xlsx", "xls", "pptx"],
+        type=["xlsx", "xls", "xlsb", "pptx"],
         accept_multiple_files=True,
-        help="Upload .xlsx, .xls, or .pptx files with asset data"
+        help="Upload .xlsx, .xls, .xlsb, or .pptx files with asset data"
     )
     
     if uploaded_files:
@@ -3706,10 +3759,10 @@ elif st.session_state.page == "AI":
             # Examples
             with st.expander("💡 Example Requests"):
                 st.markdown("""
-                - "Create a sunburst chart showing customer → tier → error hierarchy"
-                - "Show a 3D scatter plot of failures by date, customer, and tier"
+                - "Create a sunburst chart showing customer → error_category → error_type hierarchy"
+                - "Show a 3D scatter plot of failures by date, customer, and error_category"
                 - "Generate a Sankey diagram of test tier progression"
-                - "Make a heatmap of error types vs customers"
+                - "Make a heatmap of error categories vs customers"
                 - "Show a timeline of failures with trend line"
                 - "Create a radar chart comparing customer failure profiles"
                 """)

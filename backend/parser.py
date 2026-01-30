@@ -18,6 +18,189 @@ from concurrent.futures import ThreadPoolExecutor
 from column_classifier import ColumnClassifier, clean_error_type_with_nabu
 
 
+# AMD CPU Serial Number Pattern Validator
+# Pattern with anchors for exact validation - strict format
+AMD_CPU_SERIAL_PATTERN = re.compile(r'^9[A-Z0-9]{11}_\d{3}-\d{12}$')
+# Pattern without anchors for searching within text - flexible to match variations
+# Matches: 9XXX... patterns (at least 9 alphanumeric chars after the 9)
+# Examples: 9MT8017P50008_100-000001463, 9AH0242W50010_100-000001, 9AR0841T50008
+AMD_CPU_SERIAL_SEARCH_PATTERN = re.compile(r'9[A-Z0-9]{9,}(?:_\d{3}(?:-\d{1,12})?)?')
+
+def is_valid_amd_cpu_serial(serial: str) -> bool:
+    """Validate if a string matches AMD CPU serial number format.
+    
+    Flexible format to handle variations:
+    - Full: 9[A-Z0-9]{11}_[0-9]{3}-[0-9]{12}
+    - Partial: 9[A-Z0-9]{9+} (at least 9 alphanumeric chars after the 9)
+    Examples: 9MT8017P50008_100-000001463, 9AH0242W50010_100-000001, 9AR0841T50008
+    
+    Returns:
+        True if valid AMD CPU serial, False otherwise
+    """
+    if not serial or not isinstance(serial, str):
+        return False
+    serial = serial.strip()
+    # Accept flexible AMD serial format: starts with 9, at least 9 more alphanumeric chars
+    flexible_pattern = re.compile(r'^9[A-Z0-9]{9,}')
+    return flexible_pattern.match(serial) is not None
+
+def is_legend_or_reference_row(serial: str) -> bool:
+    """Check if a value looks like a legend/reference row rather than actual data.
+    
+    Legend rows contain: 'KEY', 'Label', 'Lo PROM', 'Hi PROM', 'Degradation', 'COV_', 'NFF', etc.
+    These are Excel reference information for users, not actual failure data.
+    """
+    if not serial or not isinstance(serial, str):
+        return False
+    
+    serial_lower = serial.lower().strip()
+    legend_patterns = [
+        'key', 'label', 'legend', 'reference', 'note', 'color',
+        'prom', 'degradation', 'cov_', 'nff', 'esc',
+        'description', 'definition', 'explanation'
+    ]
+    
+    return any(pattern in serial_lower for pattern in legend_patterns)
+
+def is_valid_customer_value(customer: str) -> bool:
+    """Validate that a customer value is actually a customer name, not an error type or status.
+    
+    Filters out common non-customer values that appear in messy Customer columns.
+    Returns True only for values that look like actual customer names.
+    """
+    if not customer or not isinstance(customer, str):
+        return False
+    
+    customer = customer.strip()
+    if not customer or len(customer) < 2:
+        return False
+    
+    customer_upper = customer.upper()
+    
+    # Filter out common non-customer patterns
+    non_customer_patterns = [
+        # Status/tracking values
+        'RMA', 'FA', 'NFF', 'TBD', 'TBC', 'N/A', 'NA', 'NONE', 'NULL', 'UNKNOWN',
+        # Error types
+        'ERR', 'ERROR', 'FAIL', 'PARITY', 'HANG', 'CRASH', 'WDT', 'TIMEOUT',
+        'STRESS', 'ACF', 'CORR', 'UNCORR', 'ECC', 'MCE', 'WHEA',
+        # Test stages
+        'ATE', 'SLT', 'OSV', 'CESLT', 'L1', 'L2', 'FT1', 'FT2',
+        # Common placeholder text
+        'TEST', 'DEBUG', 'SAMPLE', 'INTERNAL', 'DEMO',
+    ]
+    
+    # Check if customer value contains any non-customer patterns
+    for pattern in non_customer_patterns:
+        if pattern in customer_upper:
+            return False
+    
+    # Filter out values that are obviously error codes (e.g., "L2 TAG", "EX PARITY ERR")
+    # Error codes typically have spaces with short words
+    words = customer.split()
+    if len(words) >= 2:
+        # Check if it looks like an error code pattern
+        short_words = [w for w in words if len(w) <= 3]
+        if len(short_words) >= len(words) / 2:  # More than half are short words
+            return False
+    
+    # Accept known good customer names (case-insensitive)
+    known_customers = [
+        'TENCENT', 'ALIBABA', 'UNIT', 'HUAWEI', 'BAIDU', 'BYTEDANCE',
+        'MICROSOFT', 'GOOGLE', 'AMAZON', 'META', 'ORACLE', 'IBM',
+        'DELL', 'HP', 'HPE', 'LENOVO', 'SUPERMICRO', 'CISCO'
+    ]
+    
+    if any(known in customer_upper for known in known_customers):
+        return True
+    
+    # For unknown values, accept if they look like reasonable company names
+    # (alphanumeric, reasonable length, not all caps abbreviations)
+    if 3 <= len(customer) <= 50:  # Reasonable company name length
+        # Accept if it has some lowercase letters or is properly capitalized
+        if customer != customer_upper or len(customer) > 6:
+            return True
+    
+    return False
+
+def _guess_value_type(value: str) -> str:
+    """Guess what type of value this is for logging purposes."""
+    if not value:
+        return "empty"
+    value_upper = str(value).upper()
+    
+    if any(pattern in value_upper for pattern in ['ERR', 'FAIL', 'PARITY', 'CRASH', 'HANG']):
+        return "error type"
+    if any(pattern in value_upper for pattern in ['RMA', 'FA', 'NFF']):
+        return "status value"
+    if any(pattern in value_upper for pattern in ['ATE', 'SLT', 'OSV', 'FT1', 'FT2']):
+        return "test stage"
+    return "unknown"
+
+def extract_best_serial_from_text(text: str) -> Optional[str]:
+    """Extract the best AMD CPU serial number from text that may contain multiple words.
+    
+    Uses a scoring system to find the word that best matches AMD serial pattern.
+    Example: "9MP2379P50008_100-000001463 SLT coverage patch" -> "9MP2379P50008_100-000001463"
+    
+    Args:
+        text: Text that may contain a serial number mixed with other words
+        
+    Returns:
+        The best matching serial number, or None if no good match found
+    """
+    if not text or not isinstance(text, str):
+        return None
+    
+    # Split by common delimiters (space, comma, semicolon, newline, tab)
+    words = re.split(r'[\s,;\n\t]+', text.strip())
+    
+    best_word = None
+    best_score = 0
+    
+    for word in words:
+        if not word or len(word) < 10:  # Too short to be a serial
+            continue
+        
+        score = 0
+        
+        # Scoring system:
+        # 1. Starts with "9" (+30 points)
+        if word.startswith('9'):
+            score += 30
+        
+        # 2. Has underscore (+20 points)
+        if '_' in word:
+            score += 20
+        
+        # 3. Has dash (+10 points)
+        if '-' in word:
+            score += 10
+        
+        # 4. Length is reasonable (13-35 chars) (+10 points)
+        if 13 <= len(word) <= 35:
+            score += 10
+        
+        # 5. Mostly alphanumeric (+10 points)
+        alnum_ratio = sum(c.isalnum() for c in word) / len(word)
+        if alnum_ratio > 0.8:
+            score += 10
+        
+        # 6. Matches flexible AMD pattern (+30 points)
+        if AMD_CPU_SERIAL_SEARCH_PATTERN.search(word):
+            score += 30
+        
+        if score > best_score:
+            best_score = score
+            best_word = word
+    
+    # Require minimum score of 40 to accept as serial
+    if best_score >= 40:
+        return best_word
+    
+    return None
+
+
 class SerialNumberDetector:
     """
     Detects the serial number column in a DataFrame using heuristic scoring.
@@ -309,7 +492,6 @@ def extract_customer_from_filename(filename: str) -> Optional[str]:
     
     # Fallback: Extract first word before common separators
     # e.g., "CustomerName_Report.xlsx" -> "CustomerName"
-    import re
     match = re.match(r'^([A-Za-z]+)[\s_\-]', filename)
     if match:
         first_word = match.group(1)
@@ -379,10 +561,13 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
     # Initialize column classifier for Nabu AI-powered classification
     classifier = ColumnClassifier()
     all_columns_across_sheets = set()
+    sample_data = {}  # Store sample values for AI classification
     sheet_dataframes = {}  # Store DataFrames for second pass
     
-    # First pass: Collect all columns from all sheets
+    # First pass: Collect all columns from all sheets with sample data
     print("📊 First pass: Collecting columns from all sheets...")
+    sample_rows = []  # Store complete rows that contain AMD CPU serials
+    
     for sheet_name in sheet_names:
         try:
             # Quick skip check
@@ -390,26 +575,112 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
             if len(sheet_names) > 1 and any(pattern in sheet_lower for pattern in SKIP_SHEET_PATTERNS):
                 continue
             
-            # Read just to get columns
-            df_peek = pd.read_excel(file_path, sheet_name=sheet_name, nrows=0)
+            # Read more rows to find rows with AMD CPU pattern
+            df_peek = pd.read_excel(file_path, sheet_name=sheet_name, nrows=50)
             all_columns_across_sheets.update(df_peek.columns)
             
+            print(f"  Reading sheet '{sheet_name}': {len(df_peek)} rows, {len(df_peek.columns)} columns")
+            
+            # Debug: Show first few values from Summary column to see what we're working with
+            if 'Summary' in df_peek.columns:
+                summary_samples = df_peek['Summary'].dropna().head(10).tolist()
+                print(f"  📝 First 10 Summary values:")
+                for i, val in enumerate(summary_samples[:5], 1):
+                    val_str = str(val)[:150]
+                    print(f"    {i}. '{val_str}'")
+                    # Test pattern match
+                    if AMD_CPU_SERIAL_SEARCH_PATTERN.search(str(val)):
+                        print(f"       ✓ MATCHES AMD pattern!")
+                    else:
+                        print(f"       ✗ No match")
+            
+            # Collect complete rows that contain AMD CPU serial pattern
+            # This gives AI full context to compare columns side-by-side
+            for idx, row in df_peek.iterrows():
+                # Check if ANY column in this row contains AMD CPU pattern
+                row_dict = {}
+                has_amd_pattern = False
+                
+                for col in df_peek.columns:
+                    val = row[col]
+                    if pd.notna(val):
+                        val_str = str(val).strip()
+                        row_dict[col] = val_str[:200]  # Limit length
+                        
+                        # Check if this value contains AMD CPU pattern (search anywhere in string)
+                        if AMD_CPU_SERIAL_SEARCH_PATTERN.search(val_str):
+                            has_amd_pattern = True
+                            print(f"    ✓ Found AMD pattern in column '{col}': {val_str[:80]}...")
+                
+                # If this row contains AMD CPU pattern, add it as a sample
+                if has_amd_pattern and len(sample_rows) < 5:
+                    sample_rows.append(row_dict)
+                    print(f"  ✓ Found sample row {len(sample_rows)} with AMD CPU pattern")
+                
+                # Stop once we have enough samples
+                if len(sample_rows) >= 5:
+                    break
+            
+            if len(sample_rows) >= 5:
+                break
+            
         except Exception as e:
-            print(f"Warning: Could not peek at sheet '{sheet_name}': {str(e)}")
+            print(f"⚠ Warning: Could not peek at sheet '{sheet_name}': {str(e)}")
+            import traceback
+            traceback.print_exc()
             continue
     
-    # Classify all columns using Nabu AI
+    print(f"\n📋 Sample row collection complete: Found {len(sample_rows)} rows with AMD CPU patterns")
+    
+    # Classify all columns using Nabu AI with complete sample rows
     print(f"🤖 Classifying {len(all_columns_across_sheets)} unique columns with Nabu AI...")
+    print(f"   Sending {len(sample_rows)} complete sample rows containing AMD CPU serials")
     
     # Run async classification in a new thread to avoid event loop conflicts
     def run_async_classification():
-        return asyncio.run(classifier.classify_columns(list(all_columns_across_sheets)))
+        return asyncio.run(classifier.classify_columns(list(all_columns_across_sheets), sample_rows))
     
     with ThreadPoolExecutor() as executor:
         future = executor.submit(run_async_classification)
-        column_classification = future.result()
+        classification_result = future.result()
+    
+    # Extract classifications and serial column from result
+    column_classification = classification_result.get('classifications', {})
+    ai_serial_column = classification_result.get('serial_number_column')
+    ai_error_extraction_column = classification_result.get('error_extraction_column')
+    
+    print(f"\n✓ Column classification complete: {len(column_classification)} columns classified")
+    print(f"\n🔍 DEBUG: AI Classification Results:")
+    print(f"  - Total columns analyzed: {len(all_columns_across_sheets)}")
+    print(f"  - Columns: {list(all_columns_across_sheets)}")
+    print(f"  - Sent {len(sample_rows)} complete sample rows to AI")
+    
+    # Show first sample row (critical for debugging)
+    if sample_rows:
+        print(f"\n📋 Sample Row 1 Sent to AI:")
+        for col, val in list(sample_rows[0].items()):
+            display_val = val[:100] + '...' if len(val) > 100 else val
+            print(f"  '{col}': '{display_val}'")
+    
+    if ai_serial_column:
+        print(f"\n✓ AI identified serial number column: '{ai_serial_column}'")
+    else:
+        print(f"\n⚠ WARNING: AI did NOT identify a serial number column - will use fallback heuristic")
+    
+    if ai_error_extraction_column:
+        print(f"✓ AI identified error extraction column: '{ai_error_extraction_column}'")
+    
+    # Show classification summary
+    category_counts = {}
+    for cat in column_classification.values():
+        category_counts[cat] = category_counts.get(cat, 0) + 1
+    print(f"\n📊 Category Distribution: {category_counts}")
     
     print(f"✓ Column classification complete: {len(column_classification)} columns classified")
+    if ai_serial_column:
+        print(f"✓ AI identified serial number column: '{ai_serial_column}'")
+    if ai_error_extraction_column:
+        print(f"✓ AI identified error extraction column: '{ai_error_extraction_column}'")
     
     # Dictionary to store combined data by serial number
     combined_data: Dict[str, Dict[str, Any]] = {}
@@ -526,8 +797,15 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
                     df[col] = df[col].ffill()  # Use ffill() instead of deprecated fillna(method='ffill')
                     print(f"Forward-filled merged cells in customer column: '{col}'")
             
-            # Detect serial number column for this sheet
-            serial_column = SerialNumberDetector.detect_serial_column(df)
+            # Detect or use AI-identified serial number column
+            if ai_serial_column and ai_serial_column in df.columns:
+                serial_column = ai_serial_column
+                print(f"✓ Using AI-identified serial column: '{serial_column}'")
+            else:
+                # Fallback to heuristic detection if AI didn't identify one
+                serial_column = SerialNumberDetector.detect_serial_column(df)
+                if serial_column:
+                    print(f"✓ Fallback heuristic detected serial column: '{serial_column}'")
             
             if not serial_column:
                 # Skip sheets without detectable serial numbers
@@ -574,15 +852,49 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
             # Process each row in this sheet
             for idx, row in df.iterrows():
                 # Get serial number (required)
-                serial_number = str(row[serial_column]).strip()
+                raw_serial = str(row[serial_column]).strip()
                 
                 # Handle multi-line serial numbers (take only the first line)
                 # Some Excel files have multiple serial numbers in one cell separated by newlines
-                if '\n' in serial_number:
-                    serial_number = serial_number.split('\n')[0].strip()
+                if '\n' in raw_serial:
+                    raw_serial = raw_serial.split('\n')[0].strip()
+                
+                # Extract best serial from text using word-based scoring
+                # This handles cases like "9MP2379P50008_100-000001463 SLT coverage patch"
+                serial_number = extract_best_serial_from_text(raw_serial)
+                
+                if not serial_number:
+                    # Fallback: try using the raw value if it looks like a serial
+                    if raw_serial and is_valid_amd_cpu_serial(raw_serial):
+                        serial_number = raw_serial
+                
+                # Extract error information from serial column if AI identified it for error extraction
+                extracted_error = None
+                if ai_error_extraction_column and serial_column == ai_error_extraction_column and serial_number:
+                    # This column contains both serial numbers and error descriptions
+                    # Remove the serial from the original text to get the error description
+                    error_text = raw_serial.replace(serial_number, '').strip()
+                    # Clean up error text
+                    error_text = re.sub(r'^[,\s\-_:;]+', '', error_text)  # Remove leading punctuation
+                    error_text = re.sub(r'[,\s\-_:;]+$', '', error_text)  # Remove trailing punctuation
+                    if error_text and len(error_text) > 3:  # Meaningful error text
+                        extracted_error = error_text
+                        print(f"  Extracted error from serial column: '{error_text[:50]}...'")
                 
                 # Skip rows with invalid serial numbers
                 if not serial_number or serial_number.lower() in ['nan', 'none', '', 'null', 'nat', 'n/a', 'na', 'tbd', 'tbc']:
+                    continue
+                
+                # CRITICAL: Filter out legend/reference rows (Label KEY, Color KEY, etc.)
+                if is_legend_or_reference_row(serial_number):
+                    print(f"  Skipping legend/reference row: '{serial_number}'")
+                    continue
+                
+                # CRITICAL: Validate AMD CPU serial number format
+                # Only accept serials matching 9[A-Z0-9]{11}_[0-9]{3}-[0-9]{12}
+                # This prevents FARM-3602, GOLD, etc. from being treated as serial numbers
+                if not is_valid_amd_cpu_serial(serial_number):
+                    print(f"  Skipping invalid serial format: '{serial_number}' (expected AMD CPU format: 9XXX...XXX_###-############)")
                     continue
                 
                 # Skip header rows that appear as data (common in messy Excel files)
@@ -596,6 +908,7 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
                 # Initialize record for this serial number if it doesn't exist
                 if serial_number not in combined_data:
                     raw_data_init = {
+                        '_source_filename': source_filename,
                         '_source_sheet': sheet_name,
                         '_source_row': int(idx) + 2,  # +2 because Excel is 1-indexed and has header
                         '_serial_column': serial_column
@@ -620,9 +933,31 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
                 else:
                     # If serial number already exists from another sheet, track it
                     combined_data[serial_number]['sheets_found'].append(f"{sheet_name} (row {int(idx) + 2})")
+                    
+                    # Update raw_data to reflect multiple source locations
+                    # Keep first source as primary, but track all in _sheets_combined
+                    if '_source_sheets_all' not in combined_data[serial_number]['raw_data']:
+                        # First time seeing duplicate - preserve original source info
+                        original_sheet = combined_data[serial_number]['raw_data']['_source_sheet']
+                        original_row = combined_data[serial_number]['raw_data']['_source_row']
+                        combined_data[serial_number]['raw_data']['_source_sheets_all'] = [
+                            {"sheet": original_sheet, "row": original_row}
+                        ]
+                    # Add current location
+                    combined_data[serial_number]['raw_data']['_source_sheets_all'].append({
+                        "sheet": sheet_name,
+                        "row": int(idx) + 2
+                    })
                 
                 # Collect error_type from error columns (may have multiple)
                 error_values = []
+                
+                # First, add extracted error from serial column if available
+                if extracted_error:
+                    error_values.append(extracted_error)
+                    combined_data[serial_number]['_error_sources'].append(f"{serial_column} (extracted)")
+                
+                # Then collect from dedicated error columns
                 for error_col in error_columns:
                     if error_col in row:
                         error_value = clean_value(row[error_col])
@@ -725,6 +1060,13 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
                         # else: Same value - skip (don't duplicate)
                     else:
                         # New column - use original column name (preserves original casing/spacing)
+                        # Special validation for Customer columns
+                        col_category = column_classification.get(col, "IGNORE")
+                        if col_category == "CUSTOMER" and not is_valid_customer_value(value):
+                            # Invalid customer value - skip it
+                            print(f"  Skipping invalid customer value: '{value}' (looks like {_guess_value_type(value)})")
+                            continue
+                        
                         combined_data[serial_number]['raw_data'][col] = value
         
         except Exception as e:
@@ -739,6 +1081,14 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
             "Please ensure the file contains columns with serial numbers "
             "(headers like 'SN', 'Serial', 'PPID', '2d_barcode_sn', 'System SN', 'RMA#', etc.)"
         )
+    
+    # Post-process: Add metadata summary fields
+    for serial_number, record in combined_data.items():
+        raw_data = record['raw_data']
+        
+        # Add friendly summary of where this data came from
+        raw_data['_sheets_combined'] = ', '.join(record['sheets_found'])
+        raw_data['_total_sheets'] = len(record['sheets_found'])
     
     # Post-process: Apply customer from filename if no Customer column found in data
     for serial_number, record in combined_data.items():
@@ -781,7 +1131,6 @@ def parse_excel(file_path: str, original_filename: str = None) -> List[Dict[str,
         if component_field and raw_data[component_field]:
             component_value = str(raw_data[component_field])
             # Parse component field for serial numbers (split by /, comma, etc.)
-            import re
             # Extract potential serial numbers (alphanumeric with underscores/dashes)
             potential_parents = re.findall(r'[A-Za-z0-9_\-]{8,}', component_value)
             

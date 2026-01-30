@@ -1,35 +1,42 @@
-# 🔍 Silicon Trace v3.2
+# 🔍 Silicon Trace v3.0
 
-**Hardware Failure Analysis Tool with AI Co-Analyst & AI-Powered Data Normalization**
+**Hardware Failure Analysis Tool with AI Co-Analyst & Enhanced Analytics**
 
-A powerful local application for intelligent parsing and analysis of hardware failure data from Excel and PowerPoint files. Now featuring **AI-powered data normalization** with AMD Nabu AI for automatic column classification and error cleaning, plus **AI conversational analytics** and **Model Context Protocol (MCP) server** for scalable data access. Built with FastAPI, PostgreSQL, Streamlit, and FastMCP.
+A powerful local application for intelligent parsing and analysis of hardware failure data from Excel and PowerPoint files. Features **AI-powered column classification** with AMD Nabu AI, **AI conversational analytics with complete dataset visibility**, **error categorization for better visualizations**, and **Model Context Protocol (MCP) server** for scalable data access. Built with FastAPI, PostgreSQL, Streamlit, and FastMCP.
 
 ## ✨ Key Features
 
-### 🧹 AI-Powered Data Normalization (v3.2 - NEW!)
-- **3-Phase Nabu AI Normalization**: Intelligent data cleaning using AMD Nabu AI
-  - **Phase 1: Column Classification**: Nabu AI automatically classifies all columns into 10 categories (SERIAL_NUMBER, ERROR_TYPE, STATUS, TEST_TIER, DATE, CUSTOMER, PLATFORM, DIAGNOSTIC, DESCRIPTION, IGNORE)
-  - **Phase 2: Smart Routing**: Intelligently separates ERROR_TYPE from DIAGNOSTIC data (logs, URLs, file paths)
-  - **Phase 3: Error Cleaning**: Nabu AI cleans messy error values (dates, Chinese text, URLs, file names)
-- **Tracking Number Extraction**: Automatically detects and extracts FedEx, UPS, DHL, USPS tracking numbers into dedicated field
-- **Long Description Shortening**: Intelligently shortens verbose error descriptions to ~50 chars while preserving key information
-- **Multi-Row Header Support**: Properly handles Excel files with merged header cells (e.g., "Tier1 - ATE - FT1")
-- **Visual Indicators**: 🔄 emoji marks normalized columns in Complete View with info banner
-- **Original Data Preservation**: All original values preserved in raw_data for search and verification
-- **Bilingual Support**: Handles Chinese error descriptions (失败类型, 客户, 状态, 日期)
-- **Batch Processing**: normalize_existing_data.py script to fix existing database records
+### 🎯 Enhanced Data Intelligence (NEW!)
+- **Error Categorization**: Automatic grouping of granular errors into 19 meaningful categories
+  - Parity Error, ECC Error, Cache Error, Memory Error, Load-Store Error, etc.
+  - Makes visualizations cleaner and more insightful (97+ error types → 19 categories)
+  - Both `error_type` (granular) and `error_category` (grouped) available in API
+- **Complete Serial Number Lookup**: Statistical compression now includes ALL serial numbers with full details
+  - Every serial number mapped to status, error_type, customer, and source file
+  - AI can answer specific queries like "What's the status of serial 9MK7529X40025_100-000001651?"
+  - No MCP required for serial number lookups with datasets under 1000 records
+- **Smart Default Handling**: Assets without tier data show "Not Specified" instead of null
+- **Customer Field Extraction**: Automatic extraction from classified columns (CUSTOMER category)
+- **Tier Field Extraction**: Automatic extraction from TEST_TIER columns for better analytics
 
-### 🤖 AI Co-Analyst (v3.1)
-- **Conversational Analytics**: Ask questions about your data in natural language with full database visibility
+### 🤖 AI Co-Analyst (ENHANCED!)
+- **Conversational Analytics**: Ask questions about your data in natural language with **complete dataset visibility**
+  - AI has access to ALL serial numbers and their details via statistical compression
+  - Can answer specific queries about individual assets
+  - Full statistics for every column (customers, errors, statuses, dates)
 - **Auto-Insights**: AI automatically analyzes complete dataset and provides key findings
-- **Dynamic Visualizations**: Generate custom charts by describing them - AI creates proper aggregations
+- **Dynamic Visualizations**: Generate custom charts by describing them
+  - Recommended: "Create a sunburst chart showing customer → error_category → error_type hierarchy"
+  - AI creates proper aggregations and handles complex data types
 - **Root Cause Analysis**: Multi-step autonomous investigation with AI agent
-- **Safe Code Execution**: AI-generated code runs in sandboxed environment with pre-imported libraries
+- **Safe Code Execution**: AI-generated code runs in sandboxed environment
 - **AMD Nabu Integration**: Uses internal AMD AI - all data stays private
-- **Statistical Compression**: AI has complete statistics about all records (customers, errors, timelines) without sending raw data
-- **Integrated Interface**: AI Co-Analyst appears as 5th tab - automatically uses data from File Manager
+- **Statistical Compression**: Efficient method for datasets under 10K records
+  - Serial number directory with complete asset details
+  - Customer-error matrix for correlation analysis
+  - Timeline data for trend analysis
 
-### 🔌 MCP Server (v3.1)
+### 🔌 MCP Server
 - **Model Context Protocol Server**: Local MCP server exposing Silicon Trace database via standardized protocol
 - **6 MCP Tools**: `query_assets`, `get_asset_details`, `get_stats`, `search_failures`, `analyze_customer`, `count_assets`
 - **4 MCP Resources**: Database summary, customer list, error types, tier statistics
@@ -39,17 +46,24 @@ A powerful local application for intelligent parsing and analysis of hardware fa
 - **Docker Deployed**: Runs as separate container with shared database access
 - **Standards-Based**: Uses FastMCP framework for MCP protocol compliance
 
-### 🎯 Intelligent Data Processing (v3.0)
-- **Smart Multi-Format Parser**: Automatically processes Excel (.xlsx, .xls) and PowerPoint (.pptx) files
-- **PowerPoint OCR Support**: Multi-phase extraction from native tables, text boxes, and image-based content
-- **Smart Excel Parser**: Automatically detects serial number columns using heuristic scoring
+### 🎯 Intelligent Data Processing
+- **AI-Powered Column Classification**: Nabu AI automatically classifies columns into categories
+  - SERIAL_NUMBER, ERROR_TYPE, STATUS, TEST_TIER, DATE, CUSTOMER, PLATFORM, DIAGNOSTIC, DESCRIPTION, IGNORE
+  - Handles multilingual data (English and Chinese)
+- **Smart Multi-Format Parser**: Automatically processes Excel (.xlsx, .xls, .xlsb) and PowerPoint (.pptx) files
+- **Excel Binary Support**: Full support for .xlsb (Excel Binary Workbook) files with pyxlsb
+- **Flexible Serial Number Detection**: Word-based scoring system with AI validation
+  - Validates AMD CPU serial patterns: `9[A-Z0-9]{9,}` with optional suffixes
+  - Handles variations and multi-serial cells
 - **Multi-Sheet Support**: Combines data from multiple Excel sheets based on serial numbers
-- **Multi-File Merging**: Upload multiple files with overlapping serial numbers - data is intelligently merged and consolidated
-- **CPU SN Format Priority**: Prioritizes CPU serial number format (e.g., `9AMA377P50091_100-000001359`)
+- **Source Metadata Tracking**: Complete traceability with filename, sheet names, and row numbers
+  - `_source_filename`, `_source_sheet`, `_source_row` for every asset
+  - `_source_sheets_all` tracks multi-sheet serial numbers
+  - `_sheets_combined` provides human-readable summary
+- **Customer Validation**: Filters out non-customer values (error types, status values, system messages)
 - **Duplicate Prevention**: Prevents re-uploading the same file to avoid data duplication
-- **Column Normalization**: Merges duplicate columns with case/spacing differences (e.g., " FA status " and "FA status")
 
-### 📊 Advanced Dashboard (v3.0)
+### 📊 Advanced Dashboard
 - **Modern Dark Theme**: High-contrast visualizations optimized for readability
 - **Customer Segmentation**: All 3 graphs show customer breakdown with stacked visualizations
   - Top 10 Failure Types (Horizontal stacked bars by customer)
@@ -60,7 +74,7 @@ A powerful local application for intelligent parsing and analysis of hardware fa
 - **Chinese Translation**: Automatic detection and translation of Chinese characters to English
 - **Serial Number Filtering**: Removes serial number clutter from status labels
 
-### 🔍 Data Management (v3.0)
+### 🔍 Data Management
 - **Multi-Criteria Search**: Build complex search queries with AND/OR logic operators
   - Example: "ALIBABA" AND "L1" returns only assets matching both criteria
   - Example: "Cache" OR "Memory" returns assets matching either criterion
@@ -73,7 +87,7 @@ A powerful local application for intelligent parsing and analysis of hardware fa
 - **File-Based Filtering**: Filter assets by source file
 - **Bulk Delete**: Select and delete multiple files at once with checkboxes
 
-### 📈 Analytics (v3.2)
+### 📈 Analytics
 - **Grouped Analysis**: View assets by Customer, Status, Error Type, or **Tier Analysis**
 - **Interactive Rows**: Click any group row to see detailed asset list
 - **Tier Analysis** (IMPROVED): Comprehensive test tier progression tracking
@@ -149,35 +163,36 @@ This single command will:
 ## Architecture
 
 ```
-Silicon Trace v3.1/
+Silicon Trace v3.0/
 ├── backend/           # FastAPI application
-│   ├── main.py       # API endpoints + AI endpoints (v3.1)
+│   ├── main.py       # API endpoints + AI endpoints
 │   ├── models.py     # SQLModel database models
-│   ├── parser.py     # Intelligent Excel parser
+│   ├── parser.py     # Intelligent Excel parser with AI validation
 │   ├── pptx_parser.py # PowerPoint parser with OCR support
-│   ├── nabu_client.py # AMD Nabu AI client (v3.1 NEW)
-│   ├── code_sandbox.py # Safe code execution (v3.1 NEW)
-│   ├── silicon_trace_mcp.py # MCP server with 6 tools + 4 resources (v3.1 NEW)
-│   ├── queries.py    # Shared query logic for API and MCP (v3.1 NEW)
+│   ├── column_classifier.py # Nabu AI column classification
+│   ├── nabu_client.py # AMD Nabu AI client
+│   ├── code_sandbox.py # Safe code execution
+│   ├── silicon_trace_mcp.py # MCP server with 6 tools + 4 resources
+│   ├── queries.py    # Shared query logic for API and MCP
 │   ├── database.py   # Async PostgreSQL connection
 │   ├── Dockerfile    # Backend container
-│   └── Dockerfile.mcp # MCP server container (v3.1 NEW)
+│   └── Dockerfile.mcp # MCP server container
 ├── frontend/         # Streamlit dashboard
 │   ├── app.py        # Main UI with AI Co-Analyst integrated
 │   └── requirements.txt
 ├── .vscode/          # VS Code configuration
-│   └── mcp.json      # MCP client configuration (v3.1 NEW)
+│   └── mcp.json      # MCP client configuration
 ├── data/            # Place your Excel/PowerPoint files here (not committed)
 ├── docker-compose.yml # Orchestrates 4 containers: postgres, backend, frontend, mcp-server
 ├── start.ps1        # All-in-one startup script (includes MCP server)
 ├── start-with-mcp.ps1 # Alternative startup with explicit MCP focus
-├── MCP_README.md    # MCP server documentation (v3.1 NEW)
+├── MCP_README.md    # MCP server documentation
 └── README.md        # This file
 ```
 
 ## Usage
 
-### Upload Excel or PowerPoint Files (v3.0)
+### Upload Excel or PowerPoint Files
 
 1. Navigate to the **"File Manager"** tab (formerly "Ingest Data")
 2. Click **"Browse files"** or drag and drop files
@@ -188,7 +203,7 @@ Silicon Trace v3.1/
 - **Excel (.xlsx, .xls)**: Standard Excel workbooks with tables
 - **PowerPoint (.pptx)**: Presentations with failure data in tables, text, or images
 
-**PowerPoint Support (v3.0 NEW):**
+**PowerPoint Support:**
 The system uses a multi-phase extraction approach:
 - **Phase 1 - Native Tables**: Extracts data from PowerPoint tables (fast, most accurate)
 - **Phase 2 - Text Extraction**: Parses text boxes for "SERIAL (ERROR)" patterns
@@ -210,7 +225,7 @@ The parser will:
 - Result: One record with "FA status": "Closed as known issue | 8/7: Scan failed..."
 - Metadata shows: `_files_combined: "File1.xlsx | File2.xlsx"`
 
-### View Dashboard (v3.0)
+### View Dashboard
 
 1. Navigate to the **"Dashboard"** tab
 2. View customer-segmented graphs showing:
@@ -225,7 +240,7 @@ The parser will:
    - Automatic Chinese-to-English translation
    - Legends showing customer breakdown
 
-### Search & Filter Assets (v3.0)
+### Search & Filter Assets
 
 1. Navigate to the **"Trace Assets"** tab
 2. **Multi-Criteria Search** (NEW):
@@ -245,7 +260,7 @@ The parser will:
    - Technical metadata (source files, sheets, timestamps)
    - All fields and values
 
-### File Management (v3.0)
+### File Management
 
 1. Navigate to the **"File Manager"** tab
 2. View table of all uploaded files with:
@@ -352,7 +367,7 @@ The parser uses weighted scoring to detect serial number columns:
 - `GET /files` - Get list of uploaded files
 - `DELETE /source-files/{filename}` - Delete all assets from a file
 
-### AI Co-Analyst (v3.1)
+### AI Co-Analyst
 - `POST /ai/chat` - Natural language Q&A with conversation history
 - `POST /ai/analyze` - Auto-insights with focus area support
 - `POST /ai/visualize` - Generate custom visualizations from descriptions
@@ -605,4 +620,6 @@ For issues or questions, please create an issue on GitHub.
 
 ---
 
-**Silicon Trace v3.1** - Built with ❤️ for hardware failure analysis
+**Contact**: For questions, concerns, or feedback please reach out to AJ Dahal (ajayad@amd.com)
+
+**Silicon Trace v3.0** - Built with ❤️ for hardware failure analysis
